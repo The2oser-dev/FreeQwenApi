@@ -24,6 +24,19 @@ let authToken = null;
 let availableModels = null;
 let authKeys = null;
 
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function getPage(context) {
+    if (context && typeof context.goto === 'function') {
+        return context;
+    } else if (context && typeof context.newPage === 'function') {
+        const page = await context.newPage();
+        return page;
+    } else {
+        throw new Error('Неверный контекст: не страница Puppeteer, не контекст Playwright');
+    }
+}
+
 export const pagePool = {
     pages: [],
     maxSize: 3,
@@ -33,7 +46,7 @@ export const pagePool = {
             return this.pages.pop();
         }
 
-        const newPage = await context.newPage();
+        const newPage = await getPage(context);
         await newPage.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
 
         if (!authToken) {
@@ -51,7 +64,6 @@ export const pagePool = {
 
         return newPage;
     },
-
 
     releasePage(page) {
         if (this.pages.length < this.maxSize) {
@@ -79,21 +91,32 @@ export async function extractAuthToken(context, forceRefresh = false) {
     }
 
     try {
-        const page = await context.newPage();
-        await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        const page = await getPage(context);
+        
+        try {
+            await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+            await delay(2000);
 
-        const newToken = await page.evaluate(() => localStorage.getItem('token'));
+            const newToken = await page.evaluate(() => localStorage.getItem('token'));
 
-        await page.close();
+            if (typeof context.newPage === 'function') {
+                await page.close();
+            }
 
-        if (newToken) {
-            authToken = newToken;
-            console.log('Токен авторизации успешно извлечен');
-            saveAuthToken(authToken);
-            return authToken;
-        } else {
-            console.error('Токен авторизации не найден в браузере');
-            return null;
+            if (newToken) {
+                authToken = newToken;
+                console.log('Токен авторизации успешно извлечен');
+                saveAuthToken(authToken);
+                return authToken;
+            } else {
+                console.error('Токен авторизации не найден в браузере');
+                return null;
+            }
+        } catch (error) {
+            if (typeof context.newPage === 'function') {
+                await page.close().catch(() => {});
+            }
+            throw error;
         }
     } catch (error) {
         console.error('Ошибка при извлечении токена авторизации:', error);
@@ -154,10 +177,8 @@ export function isValidModel(modelName) {
         availableModels = getAvailableModelsFromFile();
     }
 
-
     return availableModels.includes(modelName);
 }
-
 
 export function getAllModels() {
     if (!availableModels) {
@@ -556,10 +577,11 @@ export async function sendMessage(message, model = "qwen-max-latest", chatId = n
         console.error('Ошибка при отправке сообщения:', error);
         return { error: error.toString(), chatId };
     } finally {
-
         if (page) {
             try {
-                await page.close();
+                if (typeof getBrowserContext().newPage === 'function') {
+                    await page.close();
+                }
             } catch (e) {
                 console.error('Ошибка при закрытии страницы:', e);
             }
@@ -666,7 +688,9 @@ export async function createChatV2(model = "qwen-max-latest", title = "Новы�
     } finally {
         if (page) {
             try {
-                await page.close();
+                if (typeof getBrowserContext().newPage === 'function') {
+                    await page.close();
+                }
             } catch (e) {
                 console.error('Ошибка при закрытии страницы:', e);
             }
@@ -680,11 +704,11 @@ export async function testToken(token) {
 
     let page;
     try {
-        page = await browserContext.newPage();
+        page = await getPage(browserContext);
         await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded' });
 
         const evalData = {
-            apiUrl: CHAT_API_URL,
+            apiUrl: CHAT_API_URL_V2,
             token,
             payload: {
                 chat_type: 't2t',
@@ -719,7 +743,11 @@ export async function testToken(token) {
         return 'ERROR';
     } finally {
         if (page) {
-            try { await page.close(); } catch { }
+            try {
+                if (typeof browserContext.newPage === 'function') {
+                    await page.close();
+                }
+            } catch { }
         }
     }
 }
