@@ -1,5 +1,5 @@
 import express from 'express';
-import { sendMessage, getAllModels, getApiKeys, createChatV2 } from './chat.js';
+import { sendMessage, getAllModels, getApiKeys, createChatV2, pollTaskStatus, pagePool, extractAuthToken } from './chat.js';
 import { getAuthenticationStatus, getBrowserContext } from '../browser/browser.js';
 import { checkAuthentication } from '../browser/auth.js';
 import { logInfo, logError, logDebug } from '../logger/index.js';
@@ -149,7 +149,7 @@ function handleNonStreamingResponse(res, result, mappedModel) {
 
 router.post('/chat', async (req, res) => {
     try {
-        const { message, messages, model, chatId, parentId } = req.body;
+        const { message, messages, model, chatId, parentId, chatType, size, waitForCompletion } = req.body;
         let messageContent = message;
         let systemMessage = null;
 
@@ -167,12 +167,16 @@ router.post('/chat', async (req, res) => {
         logInfo(`Получен запрос: ${typeof messageContent === 'string' ? messageContent.substring(0, 50) + (messageContent.length > 50 ? '...' : '') : 'Составное сообщение'}`);
         if (systemMessage) logInfo(`System message: ${systemMessage.substring(0, 50)}${systemMessage.length > 50 ? '...' : ''}`);
         if (chatId) logInfo(`Используется chatId: ${chatId}, parentId: ${parentId || 'null'}`);
+        if (chatType && chatType !== 't2t') {
+            const typeLabels = { t2i: 'изображение', t2v: 'видео' };
+            logInfo(`Тип чата: ${chatType} (${typeLabels[chatType] || chatType})${size ? `, размер: ${size}` : ''}`);
+        }
 
         let mappedModel = model ? getMappedModel(model) : DEFAULT_MODEL;
         if (model && mappedModel !== model) logInfo(`Модель "${model}" заменена на "${mappedModel}"`);
         logInfo(`Используется модель: ${mappedModel}`);
 
-        const result = await sendMessage(messageContent, mappedModel, chatId, parentId, null, null, null, systemMessage);
+        const result = await sendMessage(messageContent, mappedModel, chatId, parentId, null, null, null, systemMessage, chatType || 't2t', size, waitForCompletion !== false);
 
         if (result.choices?.[0]?.message) {
             logInfo(`Ответ успешно сформирован, длина: ${result.choices[0].message.content?.length || 0}`);
@@ -285,10 +289,12 @@ router.post('/chat/completions', async (req, res) => {
 
         const { combinedTools } = buildCombinedTools(tools, functions, tool_choice);
 
+        const { chatType, size, waitForCompletion } = req.body;
+
         if (stream) {
             await handleStreamingResponse(res, mappedModel, messageContent, chatId, parentId, combinedTools, tool_choice, systemMessage);
         } else {
-            const result = await sendMessage(messageContent, mappedModel, chatId, parentId, null, combinedTools, tool_choice, systemMessage);
+            const result = await sendMessage(messageContent, mappedModel, chatId, parentId, null, combinedTools, tool_choice, systemMessage, chatType || 't2t', size, waitForCompletion !== false);
             handleNonStreamingResponse(res, result, mappedModel);
         }
     } catch (error) {
@@ -332,6 +338,43 @@ router.post('/files/upload', upload.single('file'), async (req, res) => {
         logError('Ошибка при загрузке файла', error);
         if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { /* ignore */ } }
         res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+    }
+});
+
+// ─── Task status ─────────────────────────────────────────────────────────────
+
+router.get('/tasks/status/:taskId', async (req, res) => {
+    try {
+        const { taskId } = req.params;
+        if (!taskId) return res.status(400).json({ error: 'Task ID is required' });
+
+        logInfo(`Запрос статуса задачи: ${taskId}`);
+
+        const browserContext = getBrowserContext();
+        if (!browserContext) {
+            logError('Браузер не инициализирован');
+            return res.status(503).json({ error: 'Browser not initialized' });
+        }
+
+        const page = await pagePool.getPage(browserContext);
+        const token = await extractAuthToken(browserContext, false);
+        if (!token) {
+            pagePool.releasePage(page);
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+
+        const taskResult = await pollTaskStatus(taskId, page, token, 1, 0);
+        pagePool.releasePage(page);
+
+        if (taskResult.success) {
+            return res.json({ task_id: taskId, task_status: taskResult.status, ...taskResult.data });
+        }
+
+        const statusCode = taskResult.status === 'failed' ? 500 : 202;
+        return res.status(statusCode).json({ task_id: taskId, task_status: taskResult.status, error: taskResult.error, data: taskResult.data });
+    } catch (error) {
+        logError('Ошибка при проверке статуса задачи', error);
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 });
 

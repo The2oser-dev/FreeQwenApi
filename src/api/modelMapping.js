@@ -1,17 +1,20 @@
 import { DEFAULT_MODEL } from '../config.js';
 
 const CANONICAL_MODELS = Object.freeze([
+    "qwen3.5-plus",
+    "qwen3.5-397b-a17b",
     "qwen3-max",
     "qwen3-vl-plus",
     "qwen3-coder-plus",
     "qwen3-omni-flash",
+    "qwen3-omni-flash-2025-12-01",
+    "qwen-max-latest",
     "qwen-plus-2025-09-11",
+    "qwen-plus-2025-01-25",
+    "qwq-32b",
     "qwen3-235b-a22b",
     "qwen3-30b-a3b",
     "qwen3-coder-30b-a3b-instruct",
-    "qwen-max-latest",
-    "qwen-plus-2025-01-25",
-    "qwq-32b",
     "qwen-turbo-2025-02-11",
     "qwen2.5-omni-7b",
     "qvq-72b-preview-0310",
@@ -24,6 +27,15 @@ const CANONICAL_MODELS = Object.freeze([
 const CANONICAL_MODEL_SET = new Set(CANONICAL_MODELS);
 
 const ALIAS_GROUPS = Object.freeze({
+    "qwen3.5-plus": [
+        "qwen3.5",
+        "Qwen3.5-Plus",
+        "qwen3.5-plus-latest"
+    ],
+    "qwen3.5-397b-a17b": [
+        "qwen3.5-397b",
+        "Qwen3.5-397B-A17B"
+    ],
     "qwen3-max": [
         "qwen-max",
         "Qwen3-Max",
@@ -57,12 +69,14 @@ const ALIAS_GROUPS = Object.freeze({
         "Qwen3-Omni-Flash",
         "Qwen3-Omni"
     ],
+    "qwen3-omni-flash-2025-12-01": [
+        "Qwen3-Omni-Flash-2025-12-01"
+    ],
     "qwen-plus-2025-09-11": [
         "qwen-plus",
         "qwen-plus-latest",
         "Qwen3-Next",
         "Qwen3-Next-80B-A3B",
-        "Qwen3-Next-80B-A3Bб",
         "qwen3-next",
         "qwen3-next-80b-a3b"
     ],

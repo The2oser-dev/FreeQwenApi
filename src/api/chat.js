@@ -9,9 +9,10 @@ import { fileURLToPath } from 'url';
 import { logInfo, logError, logWarn, logDebug, logRaw } from '../logger/index.js';
 import crypto from 'crypto';
 import {
-    CHAT_API_URL, CREATE_CHAT_URL, CHAT_PAGE_URL,
+    CHAT_API_URL, CREATE_CHAT_URL, CHAT_PAGE_URL, TASK_STATUS_URL,
     PAGE_TIMEOUT, RETRY_DELAY, PAGE_POOL_SIZE,
-    DEFAULT_MODEL, MAX_RETRY_COUNT
+    DEFAULT_MODEL, MAX_RETRY_COUNT,
+    TASK_POLL_MAX_ATTEMPTS, TASK_POLL_INTERVAL
 } from '../config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -81,6 +82,64 @@ export const pagePool = {
         this.pages = [];
     }
 };
+
+// ─── Task polling ────────────────────────────────────────────────────────────
+
+export async function pollTaskStatus(taskId, page, token, maxAttempts = TASK_POLL_MAX_ATTEMPTS, interval = TASK_POLL_INTERVAL) {
+    logInfo(`Начинаем опрос статуса задачи: ${taskId}`);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const statusUrl = `${TASK_STATUS_URL}/${taskId}`;
+
+            const result = await page.evaluate(async (data) => {
+                try {
+                    const response = await fetch(data.url, {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${data.token}`,
+                            'Accept': 'application/json'
+                        }
+                    });
+                    if (!response.ok) {
+                        return { success: false, status: response.status, error: await response.text() };
+                    }
+                    return { success: true, data: await response.json() };
+                } catch (e) {
+                    return { success: false, error: e.toString() };
+                }
+            }, { url: statusUrl, token });
+
+            if (!result.success) {
+                logWarn(`Ошибка при проверке статуса (попытка ${attempt}/${maxAttempts}): ${result.error}`);
+                if (attempt < maxAttempts) await delay(interval);
+                continue;
+            }
+
+            const taskData = result.data;
+            const taskStatus = taskData.task_status || taskData.status || 'unknown';
+            logDebug(`Статус задачи (${attempt}/${maxAttempts}): ${taskStatus}`);
+
+            if (taskStatus === 'completed' || taskStatus === 'success') {
+                logInfo('Задача завершена успешно');
+                return { success: true, status: 'completed', data: taskData };
+            }
+
+            if (taskStatus === 'failed' || taskStatus === 'error') {
+                logError('Задача завершилась с ошибкой');
+                return { success: false, status: 'failed', error: taskData.error || taskData.message || 'Task failed', data: taskData };
+            }
+
+            if (attempt < maxAttempts) await delay(interval);
+        } catch (error) {
+            logError(`Ошибка при опросе задачи (попытка ${attempt}/${maxAttempts})`, error);
+            if (attempt < maxAttempts) await delay(interval);
+        }
+    }
+
+    logError(`Превышен лимит попыток (${maxAttempts}) для задачи ${taskId}`);
+    return { success: false, status: 'timeout', error: 'Task polling timeout exceeded' };
+}
 
 // ─── Token extraction ────────────────────────────────────────────────────────
 
@@ -221,27 +280,40 @@ async function resolveAuthToken(browserContext) {
     return authToken ? { id: 'browser', token: authToken } : null;
 }
 
-function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice) {
+function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice, chatType = 't2t', size = null) {
     const userMessageId = crypto.randomUUID();
     const assistantChildId = crypto.randomUUID();
+
+    const isVideo = chatType === 't2v';
+
+    const featureConfig = {
+        thinking_enabled: isVideo,
+        output_schema: 'phase'
+    };
+    if (isVideo) {
+        featureConfig.research_mode = 'normal';
+        featureConfig.auto_thinking = true;
+        featureConfig.thinking_format = 'summary';
+        featureConfig.auto_search = true;
+    }
 
     const newMessage = {
         fid: userMessageId,
         parentId, parent_id: parentId,
         role: 'user',
         content: messageContent,
-        chat_type: 't2t', sub_chat_type: 't2t',
+        chat_type: chatType, sub_chat_type: chatType,
         timestamp: Math.floor(Date.now() / 1000),
         user_action: 'chat',
         models: [model],
         files: files || [],
         childrenIds: [assistantChildId],
-        extra: { meta: { subChatType: 't2t' } },
-        feature_config: { thinking_enabled: false, output_schema: 'phase' }
+        extra: { meta: { subChatType: chatType } },
+        feature_config: featureConfig
     };
 
     const payload = {
-        stream: true,
+        stream: !isVideo,
         incremental_output: true,
         chat_id: chatId,
         chat_mode: 'normal',
@@ -250,6 +322,8 @@ function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMe
         parent_id: parentId,
         timestamp: Math.floor(Date.now() / 1000)
     };
+
+    if (size) payload.size = size;
 
     if (systemMessage) {
         payload.system_message = systemMessage;
@@ -285,6 +359,11 @@ async function executeApiRequest(page, apiUrl, payload, token) {
             });
 
             if (response.ok) {
+                if (data.payload.stream === false) {
+                    const jsonResponse = await response.json();
+                    return { success: true, isTask: true, data: jsonResponse };
+                }
+
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
@@ -319,6 +398,7 @@ async function executeApiRequest(page, apiUrl, payload, token) {
 
                 return {
                     success: true,
+                    isTask: false,
                     data: {
                         id: responseId || 'chatcmpl-' + Date.now(),
                         object: 'chat.completion',
@@ -339,7 +419,7 @@ async function executeApiRequest(page, apiUrl, payload, token) {
     }, requestBody);
 }
 
-async function handleApiError(response, tokenObj, message, model, chatId, parentId, files, retryCount) {
+async function handleApiError(response, tokenObj, message, model, chatId, parentId, files, retryCount, chatType, size, waitForCompletion) {
     logRaw(JSON.stringify(response));
     logError(`Ошибка при получении ответа: ${response.error || response.statusText}`);
     if (response.errorBody) logDebug(`Тело ответа с ошибкой: ${response.errorBody}`);
@@ -354,7 +434,6 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
         return { error: 'Требуется верификация. Браузер запущен в видимом режиме.', verification: true, chatId };
     }
 
-    // 401 Unauthorized — токен невалиден
     if (response.status === 401 || (response.errorBody && (response.errorBody.includes('Unauthorized') || response.errorBody.includes('Token has expired')))) {
         logWarn(`Токен ${tokenObj?.id} недействителен (401). Удаляем и пробуем другой.`);
         authToken = null;
@@ -364,7 +443,7 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
         }
         const { hasValidTokens } = await import('./tokenManager.js');
         if (hasValidTokens() && retryCount < MAX_RETRY_COUNT) {
-            return sendMessage(message, model, chatId, parentId, files, null, null, null, retryCount + 1);
+            return sendMessage(message, model, chatId, parentId, files, null, null, null, chatType, size, waitForCompletion, retryCount + 1);
         }
         logError('Не осталось валидных токенов или исчерпаны попытки.');
         await pagePool.clear();
@@ -372,7 +451,6 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
         process.exit(1);
     }
 
-    // 429 RateLimited
     if (response.errorBody && response.errorBody.includes('RateLimited')) {
         try {
             const rateInfo = JSON.parse(response.errorBody);
@@ -386,7 +464,7 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
         }
         authToken = null;
         if (retryCount < MAX_RETRY_COUNT) {
-            return sendMessage(message, model, chatId, parentId, files, null, null, null, retryCount + 1);
+            return sendMessage(message, model, chatId, parentId, files, null, null, null, chatType, size, waitForCompletion, retryCount + 1);
         }
         return { error: 'Все токены заблокированы по лимиту', chatId };
     }
@@ -396,10 +474,9 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
 
 // ─── Main public API ─────────────────────────────────────────────────────────
 
-export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null, parentId = null, files = null, tools = null, toolChoice = null, systemMessage = null, retryCount = 0) {
+export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null, parentId = null, files = null, tools = null, toolChoice = null, systemMessage = null, chatType = 't2t', size = null, waitForCompletion = true, retryCount = 0) {
     if (!availableModels) availableModels = getAvailableModelsFromFile();
 
-    // Создаём новый чат если не передан
     if (!chatId) {
         const newChatResult = await createChatV2(model);
         if (newChatResult.error) return { error: 'Не удалось создать чат: ' + newChatResult.error };
@@ -407,7 +484,6 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
         logInfo(`Создан новый чат v2 с ID: ${chatId}`);
     }
 
-    // Валидация сообщения
     const validated = validateAndPrepareMessage(message);
     if (validated.error) {
         logError(validated.error);
@@ -415,7 +491,6 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
     }
     const messageContent = validated.content;
 
-    // Валидация модели
     if (!model || model.trim() === '') {
         model = DEFAULT_MODEL;
     } else if (!isValidModel(model)) {
@@ -423,8 +498,11 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
         model = DEFAULT_MODEL;
     }
     logInfo(`Используемая модель: "${model}"`);
+    if (chatType !== 't2t') {
+        const typeLabels = { t2i: 'изображение', t2v: 'видео' };
+        logInfo(`Тип генерации: ${chatType} (${typeLabels[chatType] || chatType})${size ? `, размер: ${size}` : ''}`);
+    }
 
-    // Получаем токен
     const browserContext = getBrowserContext();
     if (!browserContext) return { error: 'Браузер не инициализирован', chatId };
 
@@ -449,12 +527,75 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
 
         logInfo('Отправка запроса к API v2...');
 
-        const payload = buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice);
+        const payload = buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice, chatType, size);
         logDebug('=== PAYLOAD V2 ===\n' + JSON.stringify(payload, null, 2));
         logDebug(`Отправка сообщения в чат ${chatId} с parent_id: ${parentId || 'null'}`);
 
         const apiUrl = `${CHAT_API_URL}?chat_id=${chatId}`;
         const response = await executeApiRequest(page, apiUrl, payload, authToken);
+
+        if (response.success && response.isTask) {
+            logInfo('Обнаружен ответ с задачей (видеогенерация)');
+            logRaw(JSON.stringify(response.data));
+
+            const taskId = extractTaskId(response.data);
+            if (!taskId) {
+                logError('Task ID не найден в ответе');
+                pagePool.releasePage(page);
+                page = null;
+                return { error: 'Task ID not found in response', chatId, rawResponse: response.data };
+            }
+
+            logInfo(`Task ID: ${taskId}`);
+
+            if (!waitForCompletion) {
+                logInfo('Возвращаем task_id для клиентского polling');
+                pagePool.releasePage(page);
+                page = null;
+                return {
+                    id: taskId,
+                    object: 'chat.completion.task',
+                    created: Math.floor(Date.now() / 1000),
+                    model,
+                    task_id: taskId,
+                    chatId,
+                    parentId: response.data.data?.parent_id || taskId,
+                    status: 'processing',
+                    message: 'Video generation task created. Poll GET /api/tasks/status/:taskId for progress.'
+                };
+            }
+
+            logInfo('Начинаем polling для получения видео...');
+            const taskResult = await pollTaskStatus(taskId, page, authToken);
+
+            pagePool.releasePage(page);
+            page = null;
+
+            if (taskResult.success && taskResult.status === 'completed') {
+                logInfo('Видео успешно сгенерировано');
+                const videoUrl = extractVideoUrl(taskResult.data);
+                return {
+                    id: taskId,
+                    object: 'chat.completion',
+                    created: Math.floor(Date.now() / 1000),
+                    model,
+                    choices: [{
+                        index: 0,
+                        message: { role: 'assistant', content: videoUrl || JSON.stringify(taskResult.data) },
+                        finish_reason: 'stop'
+                    }],
+                    usage: taskResult.data.usage || { prompt_tokens: 0, output_tokens: 0, total_tokens: 0 },
+                    response_id: taskId,
+                    chatId,
+                    parentId: taskId,
+                    task_id: taskId,
+                    video_url: videoUrl
+                };
+            }
+
+            logError(`Не удалось получить видео: ${taskResult.error}`);
+            return { error: taskResult.error || 'Video generation failed', status: taskResult.status, chatId, task_id: taskId };
+        }
 
         pagePool.releasePage(page);
         page = null;
@@ -468,7 +609,7 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             return response.data;
         }
 
-        return handleApiError(response, tokenObj, message, model, chatId, parentId, files, retryCount);
+        return handleApiError(response, tokenObj, message, model, chatId, parentId, files, retryCount, chatType, size, waitForCompletion);
     } catch (error) {
         logError('Ошибка при отправке сообщения', error);
         return { error: error.toString(), chatId };
@@ -481,6 +622,22 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             }
         }
     }
+}
+
+// ─── Task response helpers ───────────────────────────────────────────────────
+
+function extractTaskId(data) {
+    const firstMsg = data.data?.messages?.[0];
+    if (firstMsg?.extra?.wanx?.task_id) return firstMsg.extra.wanx.task_id;
+    return data.id || data.task_id || data.response_id || data.data?.message_id || null;
+}
+
+function extractVideoUrl(taskData) {
+    if (taskData.content) return taskData.content;
+    if (typeof taskData.result === 'string') return taskData.result;
+    if (taskData.result?.url) return taskData.result.url;
+    if (taskData.result?.video_url) return taskData.result.video_url;
+    return null;
 }
 
 export async function clearPagePool() {
