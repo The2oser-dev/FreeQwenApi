@@ -267,6 +267,13 @@ custom_providers:
 
 Готовый пример: [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml)
 
+Для Hermes Agent прокси поддерживает OpenAI-compatible agent loop:
+
+- `/api/chat/completions` и `/api/v1/chat/completions` принимают `tools` / legacy `functions`;
+- ответы с вызовами инструментов возвращаются как настоящие `message.tool_calls` или streaming `delta.tool_calls` с `finish_reason: "tool_calls"`;
+- tool-result продолжения Hermes (`role: "tool"`) не ломают контекст: прокси сворачивает OpenAI transcript в понятный Qwen Chat prompt и продолжает ответ после результата инструмента;
+- для Qwen Chat это адаптер поверх веб-чата, поэтому tool schemas эмулируются через системный prompt, но наружный контракт для Hermes остаётся OpenAI-compatible.
+
 LiteLLM bridge для Claude Code:
 
 ```yaml
