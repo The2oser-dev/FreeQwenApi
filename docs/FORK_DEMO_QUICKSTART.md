@@ -1,65 +1,65 @@
-# FreeQwenApi fork demo quickstart
+# Быстрый старт для демо обновлённого fork FreeQwenApi
 
-This fork is optimized for a practical video/demo workflow:
+Этот fork подготовлен под практичный сценарий для видео и демонстраций:
 
-- current Qwen Chat model list sync (`qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`);
-- OpenAI-compatible local endpoint for SDKs, Hermes Agent, Open WebUI, and LiteLLM;
-- quick smoke test command for recording without guessing whether the proxy is alive.
+- синхронизация актуального списка моделей Qwen Chat (`qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`);
+- локальный OpenAI-совместимый эндпоинт для SDK, Hermes Agent, Open WebUI и LiteLLM;
+- быстрая smoke-проверка, чтобы перед записью не гадать, жив ли прокси.
 
-## 1. Auth once
+## 1. Один раз авторизуйтесь
 
 ```bash
 npm install
 npm run auth
 ```
 
-Do not show `session/`, cookies, or token files on screen.
+Не показывайте на экране `session/`, cookies и файлы с токенами.
 
-## 2. Sync current Qwen Chat models
+## 2. Синхронизируйте актуальные модели Qwen Chat
 
 ```bash
 npm run models:sync
 ```
 
-This reads public prerendered model metadata from `https://chat.qwen.ai/`, merges it with `src/AvailableModels.txt`, and writes a report to:
+Команда читает публичные prerendered-метаданные моделей с `https://chat.qwen.ai/`, объединяет их с `src/AvailableModels.txt` и записывает отчёт сюда:
 
 ```text
 docs/QWEN_CHAT_MODELS.md
 ```
 
-## 3. Start the endpoint
+## 3. Запустите эндпоинт
 
 ```bash
 SKIP_ACCOUNT_MENU=true npm start
 ```
 
-Endpoint:
+Эндпоинт:
 
 ```text
 http://localhost:3264/api
 ```
 
-## 4. Run a smoke test
+## 4. Запустите smoke-проверку
 
-In another terminal:
+В другом терминале:
 
 ```bash
 npm run smoke
 ```
 
-Default smoke model:
+Модель для проверки по умолчанию:
 
 ```text
 qwen3.7-max
 ```
 
-Override it:
+Можно заменить:
 
 ```bash
 QWEN_PROXY_SMOKE_MODEL=qwen3.7-plus npm run smoke
 ```
 
-## 5. OpenAI SDK / curl test
+## 5. Проверка через OpenAI SDK / curl
 
 ```bash
 curl http://localhost:3264/api/chat/completions \
@@ -73,7 +73,7 @@ curl http://localhost:3264/api/chat/completions \
   }'
 ```
 
-## 6. Hermes Agent provider example
+## 6. Пример провайдера для Hermes Agent
 
 ```yaml
 custom_providers:
@@ -83,15 +83,15 @@ custom_providers:
     api_key: dummy-key
 ```
 
-Run:
+Запуск:
 
 ```bash
 hermes chat --provider custom:qwen-free --model qwen3.7-max
 ```
 
-## 7. Claude Code via LiteLLM bridge
+## 7. Claude Code через мост LiteLLM
 
-Claude Code expects Anthropic Messages API, while this proxy exposes OpenAI Chat Completions. Use LiteLLM as a bridge:
+Claude Code ожидает Anthropic Messages API, а этот прокси отдаёт OpenAI Chat Completions. Используйте LiteLLM как мост:
 
 ```yaml
 model_list:
@@ -102,28 +102,28 @@ model_list:
       api_key: dummy-key
 
 general_settings:
-  master_key: sk-qwen-local
+  master_key: ***
 ```
 
-Start LiteLLM:
+Запустите LiteLLM:
 
 ```bash
 litellm --config qwen_litellm.yaml --host 127.0.0.1 --port 4000
 ```
 
-Run Claude Code:
+Запустите Claude Code:
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
-export ANTHROPIC_AUTH_TOKEN="sk-qwen-local"
+export ANTHROPIC_AUTH_TOKEN="***"
 export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 claude --model qwen3.7-max
 ```
 
-## Video positioning
+## Как позиционировать в видео
 
-Use this wording:
+Можно говорить так:
 
-> This is not a local model running on your GPU. It is a local OpenAI-compatible proxy to Qwen Chat, useful for experiments with AI agents and local tooling.
+> Это не локальная модель, которая работает на вашей видеокарте. Это локальный OpenAI-совместимый прокси к Qwen Chat — удобно для экспериментов с AI-агентами и локальными инструментами.
 
-Avoid promising production stability: Qwen Chat limits, token expiry, account status, and API compatibility can change.
+Не обещайте production-стабильность: лимиты Qwen Chat, срок жизни токенов, состояние аккаунта и совместимость API могут меняться.

@@ -373,7 +373,7 @@ async function handleStreamingResponse(res, mappedModel, messageContent, chatId,
             writeSse({
                 id: 'chatcmpl-stream', object: 'chat.completion.chunk',
                 created: Math.floor(Date.now() / 1000), model: mappedModel,
-                choices: [{ index: 0, delta: { content: `Error: ${result.error}` }, finish_reason: null }]
+                choices: [{ index: 0, delta: { content: `Ошибка: ${result.error}` }, finish_reason: null }]
             });
         } else if (result.choices?.[0]?.message) {
             const content = String(result.choices[0].message.content || '');
@@ -524,7 +524,7 @@ router.post('/chat', async (req, res) => {
                         created: Math.floor(Date.now() / 1000),
                         model: mappedModel || 'qwen-max-latest',
                         choices: [
-                            { index: 0, delta: { content: `Error: ${result.error}` }, finish_reason: 'stop' }
+                            { index: 0, delta: { content: `Ошибка: ${result.error}` }, finish_reason: 'stop' }
                         ]
                     });
                 } else if (!hasStreamedChunks && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) {
@@ -621,7 +621,7 @@ router.get('/health', async (req, res) => {
         });
     } catch (error) {
         logError('Ошибка health check', error);
-        res.status(500).json({ ok: false, error: 'Health check failed' });
+        res.status(500).json({ ok: false, error: 'Health-проверка не удалась' });
     }
 });
 
@@ -895,7 +895,7 @@ router.post('/chat/completions', async (req, res) => {
                         created: Math.floor(Date.now() / 1000),
                         model: mappedModel || 'qwen-max-latest',
                         choices: [
-                            { index: 0, delta: { content: `Error: ${result.error}` }, finish_reason: null }
+                            { index: 0, delta: { content: `Ошибка: ${result.error}` }, finish_reason: null }
                         ]
                     });
                 } else if (!hasStreamedChunks && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) {
@@ -1186,7 +1186,7 @@ router.post('/v1/chat/completions', async (req, res) => {
                         created: Math.floor(Date.now() / 1000),
                         model: mappedModel || 'qwen-max-latest',
                         choices: [
-                            { index: 0, delta: { content: `Error: ${result.error}` }, finish_reason: 'stop' }
+                            { index: 0, delta: { content: `Ошибка: ${result.error}` }, finish_reason: 'stop' }
                         ]
                     });
                 } else if (!hasStreamedChunks && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) {
@@ -1413,7 +1413,7 @@ router.post('/images/generations', async (req, res) => {
         const { prompt, model, n, size, response_format, user } = req.body;
 
         logInfo(`Получен запрос на генерацию изображения`);
-        logDebug(`Prompt: ${prompt?.substring(0, 100)}${prompt?.length > 100 ? '...' : ''}`);
+        logDebug(`Запрос: ${prompt?.substring(0, 100)}${prompt?.length > 100 ? '...' : ''}`);
 
         if (!prompt) {
             return res.status(400).json({ error: 'Параметр "prompt" обязателен' });

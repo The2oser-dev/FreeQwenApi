@@ -1,34 +1,34 @@
 # FreeQwenApi
 
-##  updated fork
+## Обновлённый fork 
 
-This fork is optimized for practical agent demos and current Qwen Chat models:
+Этот fork оптимизирован под практичные демо с AI-агентами и актуальные модели Qwen Chat:
 
-- **Qwen 3.7 models**: adds `qwen3.7-max`, `qwen3.7-plus`, and `qwen3.6-plus` aliases/mapping.
-- **Model sync**: `npm run models:sync` refreshes the endpoint model list from Qwen Chat landing metadata.
-- **Smoke test**: `npm run smoke` checks `/api/status`, `/api/models`, and a real `qwen3.7-max` completion.
-- **Agent quickstarts**: examples for Hermes Agent and Claude Code via LiteLLM.
-- **Health endpoint**: `GET /api/health` for quick Docker/OpenWebUI/LiteLLM readiness checks.
+- **Модели Qwen 3.7**: добавлены алиасы/маппинг `qwen3.7-max`, `qwen3.7-plus` и `qwen3.6-plus`.
+- **Синхронизация моделей**: `npm run models:sync` обновляет список моделей эндпоинта из landing-метаданных Qwen Chat.
+- **Smoke-проверка**: `npm run smoke` проверяет `/api/status`, `/api/models` и реальный ответ от `qwen3.7-max`.
+- **Быстрый старт для агентов**: примеры для Hermes Agent и Claude Code через LiteLLM.
+- **Health-эндпоинт**: `GET /api/health` для быстрой проверки готовности Docker/OpenWebUI/LiteLLM.
 
-Quick demo:
+Быстрое демо:
 
 ```bash
 npm install
 npm run auth
 npm run models:sync
 SKIP_ACCOUNT_MENU=true npm start
-# in another terminal
+# в другом терминале
 npm run smoke
 ```
 
-Useful docs in this fork:
+Полезная документация в этом fork:
 
 - `docs/FORK_DEMO_QUICKSTART.md`
 - `docs/QWEN_CHAT_MODELS.md`
 - `examples/hermes/config-snippet.yaml`
 - `examples/litellm/qwen_litellm.yaml`
 
-> This is a local proxy/endpoint for Qwen Chat, not a local model running on your GPU. Use it for experiments; do not assume production stability.
+> Это локальный прокси/эндпоинт для Qwen Chat, а не локальная модель, запущенная на вашей видеокарте. Используйте для экспериментов; не рассчитывайте на production-стабильность.
 
 ---
 
@@ -747,8 +747,8 @@ POST /api/chat/completions
 Прокси полностью поддерживает работу с **OpenWebUI** через streaming режим:
 
 1. **Настройка подключения в OpenWebUI:**
-   - Base URL: `http://localhost:3264/api`
-   - API Key: любой (или оставьте пустым, если файл `Authorization.txt` пустой)
+   - Базовый URL (Base URL): `http://localhost:3264/api`
+   - API-ключ (API Key): любой (или оставьте пустым, если файл `Authorization.txt` пустой)
 
 2. **Формат запроса для OpenWebUI:**
 
@@ -1249,7 +1249,7 @@ python examples/python-sdk/conversation.py
 python examples/python-sdk/openai_compatibility.py
 ```
 
-Direct API примеры:
+Примеры прямого API:
 
 ```bash
 python examples/python-direct/httpx_example.py

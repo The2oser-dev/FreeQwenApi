@@ -1,5 +1,5 @@
-# Hermes Agent custom provider snippet
-# Add this block to ~/.hermes/config.yaml and restart Hermes.
+# Фрагмент настройки custom provider для Hermes Agent
+# Добавьте этот блок в ~/.hermes/config.yaml и перезапустите Hermes.
 
 custom_providers:
   - name: qwen-free
@@ -7,5 +7,5 @@ custom_providers:
     model: qwen3.7-max
     api_key: dummy-key
 
-# Run:
+# Запуск:
 # hermes chat --provider custom:qwen-free --model qwen3.7-max

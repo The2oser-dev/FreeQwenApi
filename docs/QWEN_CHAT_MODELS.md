@@ -1,20 +1,20 @@
-# Qwen Chat model sync
+# Синхронизация моделей Qwen Chat
 
-Generated: 2026-06-05T12:11:59.311Z
+Сгенерировано: 2026-06-05T12:34:41.245Z
 
-Source: https://chat.qwen.ai/ prerendered model metadata.
+Источник: prerendered-метаданные моделей с https://chat.qwen.ai/.
 
-## Models visible in Qwen Chat now
+## Модели, которые сейчас видны в Qwen Chat
 
-- `qwen3.7-plus` — audio, document, search, thinking, video, vision
-- `qwen3.7-max` — document, thinking
-- `qwen3.6-plus` — audio, document, search, thinking, video, vision
+- `qwen3.7-plus` — thinking-режим, аудио, видео, документы, зрение, поиск
+- `qwen3.7-max` — thinking-режим, документы
+- `qwen3.6-plus` — thinking-режим, аудио, видео, документы, зрение, поиск
 
-## Added by latest sync
+## Добавлено последней синхронизацией
 
-- Nothing new.
+- Новых моделей нет.
 
-## Existing endpoint models not listed in the current Qwen Chat landing metadata
+## Модели эндпоинта, которых нет в текущих landing-метаданных Qwen Chat
 
 - `qwen3.5-plus`
 - `qwen3.5-flash`
@@ -42,7 +42,7 @@ Source: https://chat.qwen.ai/ prerendered model metadata.
 - `qwen2.5-coder-32b-instruct`
 - `qwen2.5-72b-instruct`
 
-## Final merged endpoint list
+## Итоговый объединённый список моделей эндпоинта
 
 - `qwen3.7-plus`
 - `qwen3.7-max`

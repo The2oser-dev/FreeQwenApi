@@ -20,7 +20,7 @@ async function requestJson(path, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(`${options.method || 'GET'} ${path} failed: HTTP ${response.status} ${text.slice(0, 500)}`);
+    throw new Error(`${options.method || 'GET'} ${path}: ошибка HTTP ${response.status} ${text.slice(0, 500)}`);
   }
 
   return data;
@@ -31,11 +31,11 @@ async function main() {
   const models = await requestJson('/models');
   const modelIds = models.data.map(model => model.id);
 
-  console.log(`Status accounts: ${status.accounts?.length ?? 0}`);
-  console.log(`Models: ${modelIds.length}`);
+  console.log(`Аккаунтов в статусе: ${status.accounts?.length ?? 0}`);
+  console.log(`Моделей: ${modelIds.length}`);
 
   if (!modelIds.includes(MODEL)) {
-    throw new Error(`Smoke model ${MODEL} is missing from /models`);
+    throw new Error(`Smoke-модель ${MODEL} отсутствует в /models`);
   }
 
   const completion = await requestJson('/chat/completions', {
@@ -51,10 +51,10 @@ async function main() {
 
   const answer = completion.choices?.[0]?.message?.content || '';
   console.log(`${MODEL}: ${answer}`);
-  console.log('Smoke test OK');
+  console.log('Smoke-проверка OK');
 }
 
 main().catch(error => {
-  console.error(`Smoke test failed: ${error.message}`);
+  console.error(`Smoke-проверка не удалась: ${error.message}`);
   process.exit(1);
 });

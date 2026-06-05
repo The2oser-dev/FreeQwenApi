@@ -179,7 +179,7 @@ export async function pollTaskStatus(taskId, page, token, maxAttempts = TASK_POL
 
             if (taskStatus === 'failed' || taskStatus === 'error') {
                 logError('Задача завершилась с ошибкой');
-                return { success: false, status: 'failed', error: taskData.error || taskData.message || 'Task failed', data: taskData };
+                return { success: false, status: 'failed', error: taskData.error || taskData.message || 'Задача завершилась ошибкой', data: taskData };
             }
 
             if (attempt < maxAttempts) await delay(interval);
@@ -190,7 +190,7 @@ export async function pollTaskStatus(taskId, page, token, maxAttempts = TASK_POL
     }
 
     logError(`Превышен лимит попыток (${maxAttempts}) для задачи ${taskId}`);
-    return { success: false, status: 'timeout', error: 'Task polling timeout exceeded' };
+    return { success: false, status: 'timeout', error: 'Превышен таймаут polling задачи' };
 }
 
 // ─── Token extraction ────────────────────────────────────────────────────────
@@ -832,7 +832,7 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
                 logError('Task ID не найден в ответе');
                 pagePool.releasePage(page);
                 page = null;
-                return { error: 'Task ID not found in response', chatId, rawResponse: response.data };
+                return { error: 'Task ID не найден в ответе', chatId, rawResponse: response.data };
             }
 
             logInfo(`Task ID: ${taskId}`);
