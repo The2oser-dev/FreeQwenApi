@@ -599,6 +599,32 @@ router.post('/chat', async (req, res) => {
     }
 });
 
+router.get('/health', async (req, res) => {
+    try {
+        const modelData = getAllModels();
+        const tokens = listTokens();
+        const now = Date.now();
+        const availableAccounts = tokens.filter(t => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid).length;
+
+        res.json({
+            ok: availableAccounts > 0,
+            service: 'FreeQwenApi',
+            baseUrl: '/api',
+            models: modelData.models.length,
+            accounts: {
+                total: tokens.length,
+                available: availableAccounts,
+                invalid: tokens.filter(t => t.invalid).length,
+                waiting: tokens.filter(t => t.resetAt && new Date(t.resetAt).getTime() > now).length
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        logError('Ошибка health check', error);
+        res.status(500).json({ ok: false, error: 'Health check failed' });
+    }
+});
+
 router.get('/models', async (req, res) => {
     try {
         logInfo('Запрос на получение списка моделей');

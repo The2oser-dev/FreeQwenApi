@@ -1,5 +1,37 @@
 # FreeQwenApi
 
+##  updated fork
+
+This fork is optimized for practical agent demos and current Qwen Chat models:
+
+- **Qwen 3.7 models**: adds `qwen3.7-max`, `qwen3.7-plus`, and `qwen3.6-plus` aliases/mapping.
+- **Model sync**: `npm run models:sync` refreshes the endpoint model list from Qwen Chat landing metadata.
+- **Smoke test**: `npm run smoke` checks `/api/status`, `/api/models`, and a real `qwen3.7-max` completion.
+- **Agent quickstarts**: examples for Hermes Agent and Claude Code via LiteLLM.
+- **Health endpoint**: `GET /api/health` for quick Docker/OpenWebUI/LiteLLM readiness checks.
+
+Quick demo:
+
+```bash
+npm install
+npm run auth
+npm run models:sync
+SKIP_ACCOUNT_MENU=true npm start
+# in another terminal
+npm run smoke
+```
+
+Useful docs in this fork:
+
+- `docs/FORK_DEMO_QUICKSTART.md`
+- `docs/QWEN_CHAT_MODELS.md`
+- `examples/hermes/config-snippet.yaml`
+- `examples/litellm/qwen_litellm.yaml`
+
+> This is a local proxy/endpoint for Qwen Chat, not a local model running on your GPU. Use it for experiments; do not assume production stability.
+
+---
+
 - **Бесплатный доступ**: Используйте модели Qwen без оплаты API-ключа
 - **Полная совместимость**: Поддержка OpenAI-совместимого интерфейса для простой интеграции
 - **Возможность загрузки файлов и получение ссылки прямо из прокси**

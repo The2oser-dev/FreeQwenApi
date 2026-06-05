@@ -1,0 +1,11 @@
+# Hermes Agent custom provider snippet
+# Add this block to ~/.hermes/config.yaml and restart Hermes.
+
+custom_providers:
+  - name: qwen-free
+    base_url: http://localhost:3264/api
+    model: qwen3.7-max
+    api_key: dummy-key
+
+# Run:
+# hermes chat --provider custom:qwen-free --model qwen3.7-max
