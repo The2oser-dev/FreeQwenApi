@@ -49,7 +49,15 @@ async function main() {
     })
   });
 
+  if (completion.error) {
+    throw new Error(`Completion returned error: ${completion.error}${completion.details ? ` (${String(completion.details).slice(0, 300)})` : ''}`);
+  }
+
   const answer = completion.choices?.[0]?.message?.content || '';
+  if (!answer.trim()) {
+    throw new Error(`Completion returned empty answer: ${JSON.stringify(completion).slice(0, 500)}`);
+  }
+
   console.log(`${MODEL}: ${answer}`);
   console.log('Smoke-проверка OK');
 }

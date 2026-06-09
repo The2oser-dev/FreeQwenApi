@@ -1,6 +1,40 @@
 // config.js — Единый источник конфигурации проекта.
 // Все значения читаются из env-переменных с фоллбэками на дефолты.
 
+import fs from 'fs';
+import path from 'path';
+
+function loadDotEnv(filePath = path.join(process.cwd(), '.env')) {
+    if (!fs.existsSync(filePath)) return;
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+
+        const equalsIndex = line.indexOf('=');
+        if (equalsIndex === -1) continue;
+
+        const key = line.slice(0, equalsIndex).trim();
+        if (!key || process.env[key] !== undefined) continue;
+
+        let value = line.slice(equalsIndex + 1).trim();
+        const quoted =
+            (value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"));
+        if (quoted) {
+            value = value.slice(1, -1);
+        } else {
+            const hashIndex = value.indexOf('#');
+            if (hashIndex !== -1) value = value.slice(0, hashIndex).trim();
+        }
+
+        process.env[key] = value;
+    }
+}
+
+loadDotEnv();
+
 function toBoolean(value) {
     if (typeof value === 'boolean') return value;
     if (typeof value === 'number') return value === 1;
@@ -21,6 +55,7 @@ export const OSS_SDK_URL = process.env.OSS_SDK_URL || 'https://gosspublic.alicdn
 
 // ─── Таймауты (мс) ──────────────────────────────────────────────────────────
 export const PAGE_TIMEOUT = Number(process.env.PAGE_TIMEOUT) || 120_000;
+export const PROTOCOL_TIMEOUT = Number(process.env.PROTOCOL_TIMEOUT) || 300_000;
 export const AUTH_TIMEOUT = Number(process.env.AUTH_TIMEOUT) || 120_000;
 export const NAVIGATION_TIMEOUT = Number(process.env.NAVIGATION_TIMEOUT) || 60_000;
 export const RETRY_DELAY = Number(process.env.RETRY_DELAY) || 2_000;

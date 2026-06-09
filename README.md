@@ -26,7 +26,7 @@ http://localhost:3264/api
 - **Мультиаккаунты**: добавление, перелогин, удаление, статусы `OK` / `WAIT` / `INVALID`, автоматическая round-robin ротация при лимитах.
 - **Загрузка файлов**: upload endpoint для файлов и вложений Qwen.
 - **Open WebUI**: можно подключить как OpenAI-compatible backend.
-- **Hermes Agent / LiteLLM / Claude Code**: готовые примеры конфигов для локальных AI-агентов.
+- **Hermes Agent / OpenCode / Claude Code / Codex / OpenClaw / LiteLLM**: готовые инструкции для локальных AI-агентов и tool-use smoke-тестов.
 - **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
 - ** branding**: watermark `` в README, CLI и health/media metadata.
 
@@ -52,6 +52,23 @@ npm run smoke
 ```text
 http://localhost:3264/api
 ```
+
+## Настройка через `.env`
+
+Проект автоматически читает `.env` из корня репозитория. Начните с примера:
+
+```bash
+cp .env.example .env
+```
+
+Самые полезные параметры для агентных клиентов:
+
+- `QWEN_TOOL_PROMPT_MODE=minimal` — компактно встраивает OpenAI `tools` / `functions` в prompt. Это лучший режим для Hermes, OpenCode, Claude Code, Codex и OpenClaw.
+- `QWEN_MAX_SYSTEM_CHARS=180000` — безопасный лимит для тяжёлых агентных клиентов с большими system prompt/tool schemas. Для обычного чата можно снизить, но OpenClaw/Claude Code/Codex лучше держать высоким.
+- `QWEN_USE_NODE_FETCH=0` — оставляет запросы внутри browser `page.evaluate(fetch)`, что обычно лучше проходит Qwen anti-bot. Для отладки можно поставить `1`: ошибки anti-bot возвращаются быстрее и меньше Puppeteer-зависаний, но Node-side запросы чаще получают captcha.
+- `NON_INTERACTIVE=1` и `SKIP_ACCOUNT_MENU=1` — запуск без меню аккаунтов для локальных агентов/демонов.
+
+Полный список параметров с комментариями — в `.env.example`.
 
 ## Авторизация Qwen Chat
 
@@ -253,39 +270,233 @@ API Key: dummy-key
 
 Полная инструкция: [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md)
 
-## Hermes Agent / LiteLLM / Claude Code
+## Агенты и tool-use: Hermes, OpenCode, Claude Code, Codex, OpenClaw
 
-Hermes custom provider:
+FreeQwenApi умеет не только обычный чат, но и agent/tool-use сценарии. Снаружи это выглядит как OpenAI/Anthropic-compatible tool calling, внутри tool schemas эмулируются через системный prompt для Qwen Chat.
+
+Перед запуском агентных клиентов лучше поднять сервер так:
+
+```bash
+NON_INTERACTIVE=1 \
+SKIP_ACCOUNT_MENU=1 \
+HOST=127.0.0.1 \
+PORT=3264 \
+LOG_LEVEL=info \
+QWEN_MAX_SYSTEM_CHARS=180000 \
+QWEN_TOOL_PROMPT_MODE=minimal \
+node index.js
+```
+
+Проверка OpenAI-compatible tool call напрямую:
+
+```bash
+curl http://127.0.0.1:3264/api/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.7-max",
+    "stream": false,
+    "messages": [{"role":"user","content":"Вызови инструмент write_file для smoke.js"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "write_file",
+        "description": "Write a file",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {"type":"string"},
+            "content": {"type":"string"}
+          },
+          "required": ["path", "content"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+Ожидаемый результат — `message.tool_calls` в non-streaming режиме или `delta.tool_calls` + `finish_reason: "tool_calls"` в streaming режиме.
+
+### Hermes Agent
+
+Hermes можно подключать как OpenAI-compatible custom provider.
 
 ```yaml
 custom_providers:
   - name: qwen-free
-    base_url: http://localhost:3264/api
+    base_url: http://127.0.0.1:3264/api
     model: qwen3.7-max
     api_key: dummy-key
 ```
 
 Готовый пример: [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml)
 
-Для Hermes Agent прокси поддерживает OpenAI-compatible agent loop:
+Что поддерживается для Hermes:
 
 - `/api/chat/completions` и `/api/v1/chat/completions` принимают `tools` / legacy `functions`;
-- ответы с вызовами инструментов возвращаются как настоящие `message.tool_calls` или streaming `delta.tool_calls` с `finish_reason: "tool_calls"`;
-- tool-result продолжения Hermes (`role: "tool"`) не ломают контекст: прокси сворачивает OpenAI transcript в понятный Qwen Chat prompt и продолжает ответ после результата инструмента;
-- для Qwen Chat это адаптер поверх веб-чата, поэтому tool schemas эмулируются через системный prompt, но наружный контракт для Hermes остаётся OpenAI-compatible.
+- tool calls возвращаются как OpenAI `message.tool_calls` или streaming `delta.tool_calls`;
+- продолжения с `role: "tool"` не ломают диалог: прокси сворачивает OpenAI transcript в понятный Qwen prompt;
+- для длинных Hermes system prompt используйте `QWEN_MAX_SYSTEM_CHARS=180000`.
 
-LiteLLM bridge для Claude Code:
+### OpenCode
+
+Для одноразового smoke-теста не обязательно менять постоянный config OpenCode — можно передать provider через `OPENCODE_CONFIG_CONTENT`:
+
+```bash
+export OPENCODE_CONFIG_CONTENT='{
+  "$schema":"https://opencode.ai/config.json",
+  "provider": {
+    "freeqwen": {
+      "npm":"@ai-sdk/openai-compatible",
+      "name":"FreeQwenApi",
+      "options": {
+        "baseURL":"http://127.0.0.1:3264/api",
+        "apiKey":"dummy-key"
+      },
+      "models": {
+        "qwen3.7-max": {"name":"qwen3.7-max"}
+      }
+    }
+  }
+}'
+
+opencode run 'Create smoke.js, run it, and report output' \
+  --model freeqwen/qwen3.7-max \
+  --agent build \
+  --print-logs
+```
+
+В успешном smoke OpenCode должен реально вызвать `write`/`bash`, а не просто ответить текстом.
+
+### Claude Code
+
+Claude Code требует Anthropic Messages API, поэтому FreeQwenApi отдаёт shim:
+
+```text
+POST /api/messages
+POST /api/v1/messages
+```
+
+Запуск через локальный endpoint:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:3264/api \
+ANTHROPIC_API_KEY=dummy-key \
+ANTHROPIC_AUTH_TOKEN=dummy-key \
+ANTHROPIC_MODEL=qwen3.7-max \
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
+claude --bare -p 'Create smoke.js, run npm run smoke, return the terminal output' \
+  --model qwen3.7-max \
+  --allowedTools 'Write,Bash' \
+  --max-turns 8 \
+  --output-format json
+```
+
+Под капотом shim конвертирует Anthropic `tools`, `tool_use` и `tool_result` в OpenAI-style историю и обратно.
+
+### Codex CLI
+
+Текущий Codex CLI больше не поддерживает `wire_api = "chat"`; используйте Responses API режим:
+
+```toml
+model = "qwen3.7-max"
+model_provider = "freeqwen"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.freeqwen]
+name = "FreeQwenApi"
+base_url = "http://127.0.0.1:3264/api"
+wire_api = "responses"
+experimental_bearer_token = "dummy-key"
+```
+
+Smoke:
+
+```bash
+CODEX_HOME=/path/to/codex-home \
+codex exec 'Create smoke.js, create package.json with script smoke, run npm run smoke, return output' \
+  --skip-git-repo-check
+```
+
+### OpenClaw
+
+OpenClaw лучше запускать с большим контекстом — его system prompt и список tools заметно больше обычного.
+
+Минимальная идея provider config:
+
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "freeqwen": {
+        "baseUrl": "http://127.0.0.1:3264/api",
+        "apiKey": "dummy-key",
+        "auth": "api-key",
+        "api": "openai-completions",
+        "contextWindow": 200000,
+        "contextTokens": 180000,
+        "maxTokens": 32000,
+        "models": [
+          {
+            "id": "qwen3.7-max",
+            "name": "qwen3.7-max",
+            "api": "openai-completions",
+            "contextTokens": 180000,
+            "compat": {
+              "supportsTools": true,
+              "supportsStrictMode": false,
+              "requiresStringContent": true,
+              "strictMessageKeys": false,
+              "maxTokensField": "max_tokens"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "freeqwen/qwen3.7-max"
+    }
+  }
+}
+```
+
+Smoke:
+
+```bash
+openclaw --profile freeqwen-smoke agent \
+  --local \
+  --json \
+  --model freeqwen/qwen3.7-max \
+  --message 'Create smoke.js, run npm run smoke, return marker if successful' \
+  --timeout 240
+```
+
+### LiteLLM bridge
+
+Если нужен мост через LiteLLM:
 
 ```yaml
 model_list:
   - model_name: qwen3.7-max
     litellm_params:
       model: openai/qwen3.7-max
-      api_base: http://localhost:3264/api
+      api_base: http://127.0.0.1:3264/api
       api_key: dummy-key
 ```
 
 Готовый пример: [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml)
+
+### Важные caveats для агентов
+
+- Это Qwen Chat web proxy, не официальный tool-calling API. Tool calls эмулируются prompt adapter’ом.
+- Иногда Qwen web backend возвращает `chatId не существует`; обычно помогает повтор запроса или новый чат.
+- При частых/длинных запросах возможен anti-bot/captcha challenge.
+- Для OpenClaw/Codex/Claude Code держите `QWEN_MAX_SYSTEM_CHARS=180000`, иначе tool-инструкции могут обрезаться.
+- Если агент пишет текст вместо вызова инструмента, проверьте, что клиент реально передал `tools`, а сервер запущен с `QWEN_TOOL_PROMPT_MODE=minimal`.
 
 ## Docker
 
@@ -352,7 +563,7 @@ curl http://localhost:3264/api/videos/status
 - [IMAGE_VIDEO_GENERATION_GUIDE.md](IMAGE_VIDEO_GENERATION_GUIDE.md) — генерация изображений и видео через `chatType`.
 - [docs/IMAGE_GENERATION.md](docs/IMAGE_GENERATION.md) — DashScope/Qwen Image endpoints.
 - [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md) — подключение Open WebUI.
-- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider.
+- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider; см. раздел выше для OpenCode, Claude Code, Codex и OpenClaw.
 - [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml) — LiteLLM bridge.
 
 ## Ограничения

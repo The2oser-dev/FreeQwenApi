@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { logInfo, logError, logWarn, logDebug } from '../logger/index.js';
 import {
-    CHAT_PAGE_URL, NAVIGATION_TIMEOUT, RETRY_DELAY,
+    CHAT_PAGE_URL, NAVIGATION_TIMEOUT, RETRY_DELAY, PROTOCOL_TIMEOUT,
     VIEWPORT_WIDTH, VIEWPORT_HEIGHT, USER_AGENT,
     SESSION_DIR, ACCOUNTS_DIR
 } from '../config.js';
@@ -41,6 +41,7 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
                 '--ignore-certificate-errors', '--ignore-certificate-errors-spki-list'
             ],
             defaultViewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+            protocolTimeout: PROTOCOL_TIMEOUT,
             ignoreHTTPSErrors: true
         });
 
@@ -165,14 +166,35 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
             process.stdin.on('data', onData);
         });
 
-        const cookies = await page.cookies();
-        logInfo(`Сохранено ${cookies.length} cookies`);
+        let cookies = [];
+        try {
+            cookies = await page.cookies();
+            logInfo(`Сохранено ${cookies.length} cookies`);
+        } catch (error) {
+            logWarn(`Не удалось прочитать cookies после ручной авторизации: ${error.message}`);
+        }
 
-        const token = await page.evaluate(() =>
-            localStorage.getItem('token') || localStorage.getItem('auth_token') ||
-            localStorage.getItem('access_token') || sessionStorage.getItem('token') ||
-            sessionStorage.getItem('auth_token') || null
-        );
+        let token = null;
+        try {
+            token = await page.evaluate(() => {
+                const directKeys = ['token', 'auth_token', 'access_token', 'id_token', 'qwen_token'];
+                for (const key of directKeys) {
+                    const value = localStorage.getItem(key) || sessionStorage.getItem(key);
+                    if (value) return value;
+                }
+                const jwtLike = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+                for (const storage of [localStorage, sessionStorage]) {
+                    for (let i = 0; i < storage.length; i += 1) {
+                        const value = storage.getItem(storage.key(i)) || '';
+                        const match = value.match(jwtLike);
+                        if (match) return match[0];
+                    }
+                }
+                return null;
+            });
+        } catch (error) {
+            logWarn(`Не удалось прочитать localStorage/sessionStorage: ${error.message}`);
+        }
 
         if (token) {
             logInfo('Токен найден и будет сохранен');
@@ -187,8 +209,12 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
             }
         }
 
-        const accountId = await saveSessionPuppeteer(page);
-        if (accountId) logInfo(`Сессия сохранена с ID: ${accountId}`);
+        try {
+            const accountId = await saveSessionPuppeteer(page);
+            if (accountId) logInfo(`Сессия сохранена с ID: ${accountId}`);
+        } catch (error) {
+            logWarn(`Не удалось сохранить cookies-сессию: ${error.message}`);
+        }
 
         setAuthenticationStatus(true);
         logInfo('Авторизация завершена успешно');

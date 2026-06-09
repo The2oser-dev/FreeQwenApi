@@ -12,6 +12,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { parseToolCallJson } from './toolParser.js';
 import { listTokens, markInvalid, markRateLimited, markValid } from './tokenManager.js';
 import { _WATERMARK } from '../utils/branding.js';
 
@@ -274,6 +275,9 @@ setInterval(() => {
 
 const router = express.Router();
 
+router.head('/', (req, res) => res.sendStatus(200));
+router.get('/', (req, res) => res.json({ ok: true, service: 'FreeQwenApi', baseUrl: '/api' }));
+
 // ─── Multer для загрузки файлов ──────────────────────────────────────────────
 
 const storage = multer.diskStorage({
@@ -472,6 +476,26 @@ function compactJsonSchema(schema, depth = 0) {
     return out;
 }
 
+function minimalJsonSchema(schema, depth = 0) {
+    if (!schema || typeof schema !== 'object' || depth > 2) return undefined;
+    if (Array.isArray(schema)) return schema.slice(0, 8).map(item => minimalJsonSchema(item, depth + 1)).filter(Boolean);
+
+    const out = {};
+    for (const key of ['type', 'enum', 'required']) {
+        if (schema[key] !== undefined) out[key] = schema[key];
+    }
+    if (schema.properties && typeof schema.properties === 'object') {
+        out.properties = {};
+        for (const [name, prop] of Object.entries(schema.properties)) {
+            out.properties[name] = minimalJsonSchema(prop, depth + 1) || { type: prop?.type || 'string' };
+        }
+    }
+    if (schema.items) out.items = minimalJsonSchema(schema.items, depth + 1) || { type: schema.items?.type || 'string' };
+    if (schema.oneOf) out.oneOf = minimalJsonSchema(schema.oneOf, depth + 1);
+    if (schema.anyOf) out.anyOf = minimalJsonSchema(schema.anyOf, depth + 1);
+    return out;
+}
+
 function toolsToPrompt(tools) {
     if (!Array.isArray(tools) || tools.length === 0) return '';
 
@@ -481,14 +505,28 @@ function toolsToPrompt(tools) {
         'web_search', 'web_extract', 'session_search', 'todo', 'clarify', 'delegate_task'
     ]);
 
+    const toolPromptMode = (process.env.QWEN_TOOL_PROMPT_MODE || 'compact').toLowerCase();
     const schemas = tools.map(tool => {
         const fn = tool?.function || tool;
         if (!fn?.name) return null;
+        const priority = priorityNames.has(fn.name) ? 0 : 1;
+        if (toolPromptMode === 'names' && priority > 0) {
+            return { name: fn.name, priority };
+        }
+        if (toolPromptMode === 'minimal') {
+            const schema = {
+                name: fn.name,
+                parameters: minimalJsonSchema(fn.parameters || { type: 'object', properties: {} }) || { type: 'object', properties: {} },
+                priority
+            };
+            if (priority === 0 && fn.description) schema.description = truncateForPrompt(fn.description, 120);
+            return schema;
+        }
         return {
             name: fn.name,
-            description: truncateForPrompt(fn.description || '', priorityNames.has(fn.name) ? 420 : 180),
+            description: truncateForPrompt(fn.description || '', priority === 0 ? 420 : 180),
             parameters: compactJsonSchema(fn.parameters || { type: 'object', properties: {} }),
-            priority: priorityNames.has(fn.name) ? 0 : 1
+            priority
         };
     }).filter(Boolean).sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
 
@@ -519,73 +557,214 @@ GENERAL TOOL RULES:
 - Never invent tool results. After tool results appear in the conversation, use them to continue.
 - Use exact tool names from the list above. Do not prefix names with namespaces.
 
-TOOL CALL OUTPUT FORMAT — respond ONLY with minified JSON, no markdown, no prose:
+TOOL CALL OUTPUT FORMAT — respond ONLY with a machine-readable tool block, no prose.
+Preferred JSON:
 {"tool_calls":[{"name":"tool_name","arguments":{}}]}
 
 Multiple calls are allowed:
 {"tool_calls":[{"name":"skill_view","arguments":{"name":"hermes-agent"}},{"name":"terminal","arguments":{"command":"pwd"}}]}
 
-Supported fallback shapes also work, but the format above is preferred.
+If JSON escaping is risky, use this DSML fallback exactly:
+<|DSML|tool_calls><|DSML|invoke name="tool_name"><|DSML|parameter name="arg">value</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>
+Use CDATA for multiline/code/file content:
+<|DSML|parameter name="content"><![CDATA[multiline text]]></|DSML|parameter>
+
+Supported fallback shapes are parsed, but the JSON format above is preferred.
 
 Compact tool schemas:
 ${JSON.stringify(schemas.map(({priority, ...schema}) => schema), null, 2)}
 
 If no tool is needed and no skill rule applies, answer normally.`;
 }
-function parseToolCallJson(content) {
-    if (typeof content !== 'string') return null;
-    let text = content.trim();
-    const fence = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-    if (fence) text = fence[1].trim();
-    const first = text.indexOf('{');
-    const last = text.lastIndexOf('}');
-    if (first > 0 || last !== text.length - 1) {
-        if (first >= 0 && last > first) text = text.slice(first, last + 1);
-    }
-    const parseAttempts = [text];
-    // Qwen sometimes emits one missing brace in the common shape:
-    // {"tool_calls":[{"name":"x","arguments":{...}}]} -> may become ..."arguments":{...}]}
-    if (/^\s*\{\s*"tool_calls"\s*:\s*\[\s*\{/.test(text) && /\}\]\}\s*$/.test(text)) {
-        parseAttempts.push(text.replace(/\}\]\}\s*$/, '}}]}'));
-    }
-    if (/^\s*\{\s*"tool_calls"\s*:\s*\[/.test(text) && !/\}\s*$/.test(text)) {
-        parseAttempts.push(text + '}');
-    }
+function limitSystemMessageForQwen(systemMessage) {
+    const maxChars = Number.parseInt(process.env.QWEN_MAX_SYSTEM_CHARS || '', 10);
+    const text = String(systemMessage || '');
+    if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return systemMessage;
 
-    for (const candidate of parseAttempts) {
-        try {
-            const parsed = JSON.parse(candidate);
-            let calls = null;
-            if (Array.isArray(parsed.tool_calls)) {
-                calls = parsed.tool_calls;
-            } else if (parsed.function_call || parsed.tool_call) {
-                calls = [parsed.function_call || parsed.tool_call];
-            } else if (parsed.name || parsed.tool) {
-                calls = [parsed];
-            }
-            if (!calls || calls.length === 0) continue;
-            return calls.map((call, index) => {
-                const name = call.name || call.tool || call.function?.name;
-                const rawArgs = call.arguments ?? call.args ?? call.input ?? call.function?.arguments ?? {};
-                const args = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {});
-                if (!name) return null;
-                return {
-                    id: call.id || `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
-                    type: 'function',
-                    function: { name, arguments: args },
-                    index
-                };
-            }).filter(Boolean);
-        } catch {
-            // try next repair candidate
-        }
-    }
-    return null;
+    // Keep the beginning (persona/safety) and the end (tool adapter/schema). The
+    // middle is usually long skill catalogs/memories, and very large system
+    // prompts can trigger Qwen web anti-bot responses before generation starts.
+    const marker = `\n\n[FreeQwenApi truncated ${text.length - maxChars} system-prompt chars to stay under QWEN_MAX_SYSTEM_CHARS=${maxChars}]\n\n`;
+    const remaining = Math.max(0, maxChars - marker.length);
+    const head = Math.ceil(remaining * 0.45);
+    const tail = remaining - head;
+    return `${text.slice(0, head)}${marker}${text.slice(text.length - tail)}`;
 }
 
 function applyToolPrompt(systemMessage, tools) {
     const prompt = toolsToPrompt(tools);
-    return prompt ? `${systemMessage || ''}${prompt}`.trim() : systemMessage;
+    const toolAwareSystemMessage = prompt ? `${systemMessage || ''}${prompt}`.trim() : systemMessage;
+    return limitSystemMessageForQwen(toolAwareSystemMessage);
+}
+
+function anthropicTextFromContent(content) {
+    if (content === null || content === undefined) return '';
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return JSON.stringify(content);
+
+    return content.map(block => {
+        if (!block) return '';
+        if (typeof block === 'string') return block;
+        if (block.type === 'text') return block.text || '';
+        if (block.type === 'tool_result') {
+            const value = typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '');
+            return `Tool result (${block.tool_use_id || 'tool'}): ${value}`;
+        }
+        if (block.type === 'tool_use') {
+            return `Assistant tool call: ${JSON.stringify({ name: block.name, input: block.input || {}, id: block.id })}`;
+        }
+        return JSON.stringify(block);
+    }).filter(Boolean).join('\n');
+}
+
+function anthropicMessagesToOpenAI(body) {
+    const messages = [];
+    if (body.system) {
+        messages.push({ role: 'system', content: anthropicTextFromContent(body.system) });
+    }
+
+    for (const msg of body.messages || []) {
+        if (!msg) continue;
+        const content = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: String(msg.content || '') }];
+        const toolUseBlocks = content.filter(block => block?.type === 'tool_use');
+        const toolResultBlocks = content.filter(block => block?.type === 'tool_result');
+        const text = anthropicTextFromContent(content.filter(block => block?.type !== 'tool_use'));
+
+        if (msg.role === 'assistant' && toolUseBlocks.length > 0) {
+            messages.push({
+                role: 'assistant',
+                content: text || null,
+                tool_calls: toolUseBlocks.map(block => ({
+                    id: block.id || `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+                    type: 'function',
+                    function: { name: block.name, arguments: JSON.stringify(block.input || {}) }
+                }))
+            });
+            continue;
+        }
+
+        if (toolResultBlocks.length > 0) {
+            for (const block of toolResultBlocks) {
+                messages.push({
+                    role: 'tool',
+                    tool_call_id: block.tool_use_id || 'tool',
+                    content: anthropicTextFromContent(block.content)
+                });
+            }
+            const onlyToolResults = content.every(block => block?.type === 'tool_result');
+            if (!onlyToolResults && text) messages.push({ role: 'user', content: text });
+            continue;
+        }
+
+        messages.push({ role: msg.role === 'assistant' ? 'assistant' : 'user', content: text });
+    }
+    return messages;
+}
+
+function anthropicToolsToOpenAI(tools) {
+    if (!Array.isArray(tools)) return undefined;
+    return tools.map(tool => ({
+        type: 'function',
+        function: {
+            name: tool.name,
+            description: tool.description || '',
+            parameters: tool.input_schema || { type: 'object', properties: {} }
+        }
+    })).filter(tool => tool.function.name);
+}
+
+function openAIToAnthropicMessage(openAIJson, requestedModel) {
+    const choice = openAIJson?.choices?.[0] || {};
+    const message = choice.message || {};
+    const content = [];
+
+    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        for (const call of message.tool_calls) {
+            let input = {};
+            try { input = JSON.parse(call.function?.arguments || '{}'); } catch { input = {}; }
+            content.push({
+                type: 'tool_use',
+                id: call.id || `toolu_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+                name: call.function?.name,
+                input
+            });
+        }
+    }
+
+    if (message.content) content.push({ type: 'text', text: message.content });
+    if (content.length === 0) content.push({ type: 'text', text: '' });
+
+    return {
+        id: openAIJson?.id || `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+        type: 'message',
+        role: 'assistant',
+        model: openAIJson?.model || requestedModel || DEFAULT_MODEL,
+        content,
+        stop_reason: content.some(block => block.type === 'tool_use') ? 'tool_use' : 'end_turn',
+        stop_sequence: null,
+        usage: {
+            input_tokens: openAIJson?.usage?.prompt_tokens || 0,
+            output_tokens: openAIJson?.usage?.completion_tokens || 0
+        }
+    };
+}
+
+function writeAnthropicStream(res, message) {
+    const write = (event, data) => {
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+    write('message_start', { type: 'message_start', message: { ...message, content: [], stop_reason: null, stop_sequence: null } });
+    message.content.forEach((block, index) => {
+        if (block.type === 'tool_use') {
+            write('content_block_start', { type: 'content_block_start', index, content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} } });
+            write('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input || {}) } });
+        } else {
+            write('content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+            write('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: block.text || '' } });
+        }
+        write('content_block_stop', { type: 'content_block_stop', index });
+    });
+    write('message_delta', { type: 'message_delta', delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { output_tokens: message.usage?.output_tokens || 0 } });
+    write('message_stop', { type: 'message_stop' });
+    res.end();
+}
+
+async function handleAnthropicMessages(req, res) {
+    try {
+        const body = req.body || {};
+        logInfo(`Получен Anthropic-compatible Messages запрос${body.stream ? ' (stream)' : ''}`);
+        const openAiBody = {
+            model: body.model || DEFAULT_MODEL,
+            messages: anthropicMessagesToOpenAI(body),
+            tools: anthropicToolsToOpenAI(body.tools),
+            tool_choice: body.tool_choice?.type === 'tool' ? { type: 'function', function: { name: body.tool_choice.name } } : body.tool_choice,
+            stream: false,
+            max_tokens: body.max_tokens,
+            temperature: body.temperature
+        };
+
+        const url = `${req.protocol}://${req.get('host')}${req.baseUrl}/chat/completions`;
+        const upstream = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-force-new-chat': '1' },
+            body: JSON.stringify(openAiBody)
+        });
+        const openAIJson = await upstream.json();
+        if (!upstream.ok) return res.status(upstream.status).json({ type: 'error', error: { type: 'api_error', message: openAIJson?.error || 'upstream error' } });
+        const anthropicMessage = openAIToAnthropicMessage(openAIJson, body.model);
+
+        if (body.stream) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            return writeAnthropicStream(res, anthropicMessage);
+        }
+        res.json(anthropicMessage);
+    } catch (error) {
+        logError('Ошибка Anthropic-compatible Messages запроса', error);
+        res.status(500).json({ type: 'error', error: { type: 'api_error', message: error.message || 'internal error' } });
+    }
 }
 
 function buildOpenAIToolResponse(result, mappedModel, toolCalls) {
@@ -611,7 +790,19 @@ function buildOpenAIToolResponse(result, mappedModel, toolCalls) {
     };
 }
 
-function writeToolCallsSse(res, mappedModel, result, toolCalls) {
+function wantsOpenAIStreamUsage(body = {}) {
+    return body?.stream_options?.include_usage === true || body?.streamOptions?.includeUsage === true;
+}
+
+function writeOpenAIUsageSse(res, base, usage = null) {
+    res.write('data: ' + JSON.stringify({
+        ...base,
+        choices: [],
+        usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+    }) + '\n\n');
+}
+
+function writeToolCallsSse(res, mappedModel, result, toolCalls, includeUsage = false) {
     const base = {
         id: result.id || 'chatcmpl-stream',
         object: 'chat.completion.chunk',
@@ -643,6 +834,7 @@ function writeToolCallsSse(res, mappedModel, result, toolCalls) {
         ...base,
         choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
     }) + '\n\n');
+    if (includeUsage) writeOpenAIUsageSse(res, base, result.usage);
     res.write('data: [DONE]\n\n');
     res.end();
 }
@@ -954,6 +1146,9 @@ router.get('/models', async (req, res) => {
     }
 });
 
+router.post('/v1/messages', handleAnthropicMessages);
+router.post('/messages', handleAnthropicMessages);
+
 router.get('/status', async (req, res) => {
     try {
         logInfo('Запрос статуса авторизации');
@@ -1191,7 +1386,7 @@ router.post('/chat/completions', async (req, res) => {
                 if (captureToolCalls) {
                     const toolCalls = parseToolCallJson(result?.choices?.[0]?.message?.content);
                     if (toolCalls && toolCalls.length > 0) {
-                        writeToolCallsSse(res, mappedModel, result, toolCalls);
+                        writeToolCallsSse(res, mappedModel, result, toolCalls, wantsOpenAIStreamUsage(req.body));
                         return;
                     }
                 }
@@ -1240,15 +1435,19 @@ router.post('/chat/completions', async (req, res) => {
                 }
                 // Чанки уже были отправлены через streamingCallback, не дублируем!
 
-                writeSse({
+                const finalBase = {
                     id: 'chatcmpl-stream',
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
-                    model: mappedModel || 'qwen-max-latest',
+                    model: mappedModel || 'qwen-max-latest'
+                };
+                writeSse({
+                    ...finalBase,
                     choices: [
                         { index: 0, delta: {}, finish_reason: 'stop' }
                     ]
                 });
+                if (wantsOpenAIStreamUsage(req.body)) writeOpenAIUsageSse(res, finalBase, result.usage);
                 res.write('data: [DONE]\n\n');
                 res.end();
 
@@ -1519,7 +1718,7 @@ router.post('/v1/chat/completions', async (req, res) => {
                 if (captureToolCalls) {
                     const toolCalls = parseToolCallJson(result?.choices?.[0]?.message?.content);
                     if (toolCalls && toolCalls.length > 0) {
-                        writeToolCallsSse(res, mappedModel, result, toolCalls);
+                        writeToolCallsSse(res, mappedModel, result, toolCalls, wantsOpenAIStreamUsage(req.body));
                         return;
                     }
                 }
@@ -1563,15 +1762,19 @@ router.post('/v1/chat/completions', async (req, res) => {
                 }
                 // Чанки уже были отправлены через streamingCallback, не дублируем!
 
-                writeSse({
+                const finalBase = {
                     id: 'chatcmpl-stream',
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
-                    model: mappedModel || 'qwen-max-latest',
+                    model: mappedModel || 'qwen-max-latest'
+                };
+                writeSse({
+                    ...finalBase,
                     choices: [
                         { index: 0, delta: {}, finish_reason: 'stop' }
                     ]
                 });
+                if (wantsOpenAIStreamUsage(req.body)) writeOpenAIUsageSse(res, finalBase, result.usage);
                 res.write('data: [DONE]\n\n');
                 res.end();
 

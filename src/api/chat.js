@@ -28,6 +28,38 @@ let browserTokenRateLimited = false;
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+function asciiTimezone(date = new Date()) {
+    return date.toString().replace(/[\u0080-\uFFFF]/g, '');
+}
+
+export function buildQwenCompletionUrl(apiUrl, chatId) {
+    if (!chatId) return apiUrl;
+    const url = new URL(apiUrl, CHAT_PAGE_URL);
+    if (!url.searchParams.has('chat_id')) {
+        url.searchParams.set('chat_id', chatId);
+    }
+    return url.toString();
+}
+
+export function buildQwenRequestHeaders(token, requestIdFactory = crypto.randomUUID) {
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+        'Timezone': asciiTimezone(),
+        'Version': process.env.QWEN_WEB_VERSION || '0.2.63',
+        'X-Accel-Buffering': 'no',
+        'X-Request-Id': requestIdFactory(),
+        'source': 'web'
+    };
+
+    if (token) {
+        headers.Authorization = `Bearer ${token}`;
+    }
+
+    return headers;
+}
+
 // ─── Page helpers ────────────────────────────────────────────────────────────
 
 async function getPage(context) {
@@ -205,7 +237,24 @@ export async function extractAuthToken(context, forceRefresh = false) {
             await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
             await delay(RETRY_DELAY);
 
-            const newToken = await page.evaluate(() => localStorage.getItem('token'));
+            const newToken = await page.evaluate(async () => {
+                function findTokenInStorage(storage) {
+                    const directKeys = ['token', 'auth_token', 'access_token', 'id_token', 'qwen_token'];
+                    for (const key of directKeys) {
+                        const value = storage.getItem(key);
+                        if (value) return value;
+                    }
+                    const jwtLike = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+                    for (let i = 0; i < storage.length; i += 1) {
+                        const value = storage.getItem(storage.key(i)) || '';
+                        const match = value.match(jwtLike);
+                        if (match) return match[0];
+                    }
+                    return null;
+                }
+
+                return findTokenInStorage(localStorage) || findTokenInStorage(sessionStorage);
+            });
             if (shouldClosePage) await page.close();
 
             if (newToken) {
@@ -372,6 +421,7 @@ function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMe
 
     const payload = {
         stream: !isVideo,
+        version: '2.1',
         incremental_output: true,
         chat_id: chatId,
         chat_mode: 'normal',
@@ -395,7 +445,21 @@ function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMe
     return payload;
 }
 
+export function isQwenAntiBotBody(body) {
+    if (typeof body !== 'string') return false;
+    const lower = body.toLowerCase();
+    return lower.includes('/_____tmd_____/punish') ||
+        (lower.includes('window._config_') && lower.includes('captcha')) ||
+        lower.includes('rgv587') ||
+        lower.includes('fail_sys_user_validate') ||
+        lower.includes('purecaptcha');
+}
+
 function parseNonSseCompletionBody(body) {
+    if (isQwenAntiBotBody(body)) {
+        return { success: false, antiBot: true, error: 'Qwen anti-bot challenge returned for Node fetch', errorBody: body };
+    }
+
     try {
         const parsed = JSON.parse(body);
         const topLevelCode = parsed?.code;
@@ -431,13 +495,11 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
         if (!token) return { success: false, error: 'Токен авторизации не найден' };
         if (typeof fetch !== 'function') return { success: false, error: 'Fetch API is unavailable' };
 
-        const response = await fetch(apiUrl, {
+        const requestUrl = buildQwenCompletionUrl(apiUrl, payload?.chat_id);
+
+        const response = await fetch(requestUrl, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-                'Accept': '*/*'
-            },
+            headers: buildQwenRequestHeaders(token),
             body: JSON.stringify(payload)
         });
 
@@ -555,39 +617,37 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
 }
 
 async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
-    if (payload?.stream !== false && typeof onChunk === 'function') {
+    const preferNodeFetch = String(process.env.QWEN_USE_NODE_FETCH || '').toLowerCase() === '1' || String(process.env.QWEN_USE_NODE_FETCH || '').toLowerCase() === 'true';
+    if (payload?.stream !== false && (typeof onChunk === 'function' || preferNodeFetch)) {
         const streamedResponse = await executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk);
 
         const canReturnDirectly =
             streamedResponse.success ||
             Boolean(streamedResponse.status) ||
-            Boolean(streamedResponse.errorBody) ||
+            (Boolean(streamedResponse.errorBody) && !streamedResponse.antiBot) ||
             streamedResponse.hasStreamedChunks === true;
 
-        if (canReturnDirectly) {
+        if (canReturnDirectly || (preferNodeFetch && streamedResponse.antiBot)) {
             return streamedResponse;
         }
 
         logWarn(`Node-streaming недоступен (${streamedResponse.error || 'unknown error'}), fallback к browser fetch.`);
     }
 
-    const requestBody = { apiUrl, payload, token };
+    const requestBody = {
+        apiUrl: buildQwenCompletionUrl(apiUrl, payload?.chat_id),
+        payload,
+        headers: buildQwenRequestHeaders(token)
+    };
 
     logDebug(`Используем токен: ${token ? 'Токен существует' : 'Токен отсутствует'}`);
     logDebug(`API URL: ${apiUrl}`);
 
     return page.evaluate(async (data) => {
         try {
-            const t = data.token;
-            if (!t) return { success: false, error: 'Токен авторизации не найден' };
-
             const response = await fetch(data.apiUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${t}`,
-                    'Accept': '*/*'
-                },
+                headers: data.headers,
                 body: JSON.stringify(data.payload)
             });
 
@@ -613,14 +673,18 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
                             Boolean(parsed?.error) ||
                             Boolean(parsed?.data?.error) ||
                             Boolean(topLevelCode) ||
-                            Boolean(nestedCode);
+                            Boolean(nestedCode) ||
+                            (Array.isArray(parsed?.ret) && parsed.ret.length > 0);
 
                         // API иногда возвращает JSON с success=false и code при HTTP 200.
                         if (hasStructuredError) {
                             const isRateLimited = topLevelCode === 'RateLimited' || nestedCode === 'RateLimited';
+                            const antiBot = /rgv587|fail_sys_user_validate|_____tmd_____|purecaptcha/i.test(body);
                             return {
                                 success: false,
-                                status: isRateLimited ? 429 : 500,
+                                status: isRateLimited ? 429 : antiBot ? 403 : 500,
+                                antiBot,
+                                error: antiBot ? 'Qwen anti-bot challenge returned for browser fetch' : undefined,
                                 errorBody: body
                             };
                         }
@@ -766,8 +830,14 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
 export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null, parentId = null, files = null, tools = null, toolChoice = null, systemMessage = null, chatType = 't2t', size = null, waitForCompletion = true, retryCount = 0, onChunk = null) {
     if (!availableModels) availableModels = getAvailableModelsFromFile();
 
+    const browserContext = getBrowserContext();
+    if (!browserContext) return { error: 'Браузер не инициализирован', chatId };
+
+    const tokenObj = await resolveAuthToken(browserContext);
+    if (!tokenObj) return { error: 'Ошибка авторизации: не удалось получить токен', chatId };
+
     if (!chatId) {
-        const newChatResult = await createChatV2(model, 'Новый чат', 0, chatType);
+        const newChatResult = await createChatV2(model, 'Новый чат', 0, chatType, tokenObj);
         if (newChatResult.error) return { error: 'Не удалось создать чат: ' + newChatResult.error };
         chatId = newChatResult.chatId;
         logInfo(`Создан новый чат v2 с ID: ${chatId}`);
@@ -791,12 +861,6 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
         const typeLabels = { t2i: 'изображение', t2v: 'видео' };
         logInfo(`Тип генерации: ${chatType} (${typeLabels[chatType] || chatType})${size ? `, размер: ${size}` : ''}`);
     }
-
-    const browserContext = getBrowserContext();
-    if (!browserContext) return { error: 'Браузер не инициализирован', chatId };
-
-    const tokenObj = await resolveAuthToken(browserContext);
-    if (!tokenObj) return { error: 'Ошибка авторизации: не удалось получить токен', chatId };
 
     let page = null;
     try {
@@ -1005,11 +1069,11 @@ export function getAuthToken() {
 
 // ─── createChatV2 ────────────────────────────────────────────────────────────
 
-export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый чат', retryCount = 0, chatType = 't2t') {
+export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый чат', retryCount = 0, chatType = 't2t', preferredTokenObj = null) {
     const browserContext = getBrowserContext();
     if (!browserContext) return { error: 'Браузер не инициализирован' };
 
-    const tokenObj = await getAvailableToken();
+    const tokenObj = preferredTokenObj || await getAvailableToken();
     if (tokenObj?.token) {
         authToken = tokenObj.token;
         logInfo(`Используется аккаунт для создания чата: ${tokenObj.id}`);
@@ -1026,13 +1090,13 @@ export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый ч
         page = await pagePool.getPage(browserContext);
 
         const payload = { title, models: [model], chat_mode: 'normal', chat_type: chatType, timestamp: Date.now() };
-        const requestBody = { apiUrl: CREATE_CHAT_URL, payload, token: authToken };
+        const requestBody = { apiUrl: CREATE_CHAT_URL, payload, headers: buildQwenRequestHeaders(authToken) };
 
         const result = await page.evaluate(async (data) => {
             try {
                 const response = await fetch(data.apiUrl, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${data.token}` },
+                    headers: data.headers,
                     body: JSON.stringify(data.payload)
                 });
                 if (response.ok) return { success: true, data: await response.json() };
@@ -1054,7 +1118,7 @@ export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый ч
         if (isTransient && retryCount < MAX_RETRY_COUNT) {
             logWarn(`Создание чата: ${result.status}, ретрай ${retryCount + 1}/${MAX_RETRY_COUNT} через ${RETRY_DELAY}мс...`);
             await delay(RETRY_DELAY);
-            return createChatV2(model, title, retryCount + 1, chatType);
+            return createChatV2(model, title, retryCount + 1, chatType, preferredTokenObj);
         }
 
         const cleanError = isTransient
@@ -1087,7 +1151,7 @@ export async function testToken(token) {
 
         const requestBody = {
             apiUrl: CHAT_API_URL,
-            token,
+            headers: buildQwenRequestHeaders(token),
             payload: { chat_type: 't2t', messages: [{ role: 'user', content: 'ping', chat_type: 't2t' }], model: DEFAULT_MODEL, stream: false }
         };
 
@@ -1095,7 +1159,7 @@ export async function testToken(token) {
             try {
                 const res = await fetch(data.apiUrl, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${data.token}` },
+                    headers: data.headers,
                     body: JSON.stringify(data.payload)
                 });
                 return { ok: res.ok, status: res.status };
