@@ -768,7 +768,47 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
     }, requestBody);
 }
 
-async function handleApiError(response, tokenObj, message, model, chatId, parentId, files, retryCount, chatType, size, waitForCompletion, onChunk = null) {
+export function buildAccountSwitchRetryArgs(requestContext = {}) {
+    const {
+        message,
+        model,
+        files = null,
+        tools = null,
+        toolChoice = null,
+        systemMessage = null,
+        chatType = 't2t',
+        size = null,
+        waitForCompletion = true,
+        retryCount = 0,
+        onChunk = null
+    } = requestContext;
+
+    return [
+        message,
+        model,
+        null,
+        null,
+        files,
+        tools,
+        toolChoice,
+        systemMessage,
+        chatType,
+        size,
+        waitForCompletion,
+        retryCount + 1,
+        onChunk
+    ];
+}
+
+export async function retryAfterAccountSwitch(requestContext, sendMessageFn) {
+    if (typeof sendMessageFn !== 'function') {
+        throw new TypeError('sendMessageFn must be a function');
+    }
+    return sendMessageFn(...buildAccountSwitchRetryArgs(requestContext));
+}
+
+async function handleApiError(response, tokenObj, requestContext) {
+    const { chatId, retryCount } = requestContext;
     logRaw(JSON.stringify(response));
     logError(`Ошибка при получении ответа: ${response.error || response.statusText}`);
     if (response.errorBody) logDebug(`Тело ответа с ошибкой: ${response.errorBody}`);
@@ -793,7 +833,8 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
         }
         const { hasValidTokens } = await import('./tokenManager.js');
         if (hasValidTokens() && retryCount < MAX_RETRY_COUNT) {
-            return sendMessage(message, model, chatId, parentId, files, null, null, null, chatType, size, waitForCompletion, retryCount + 1, onChunk);
+            logInfo('Пересоздаем чат под следующим доступным аккаунтом после ошибки авторизации');
+            return retryAfterAccountSwitch(requestContext, sendMessage);
         }
         logError('Не осталось валидных токенов или исчерпаны попытки.');
         return { error: 'Все токены недействительны (401). Требуется повторная авторизация.', chatId };
@@ -817,7 +858,8 @@ async function handleApiError(response, tokenObj, message, model, chatId, parent
         authToken = null;
         const { hasValidTokens } = await import('./tokenManager.js');
         if (hasValidTokens() && retryCount < MAX_RETRY_COUNT) {
-            return sendMessage(message, model, chatId, parentId, files, null, null, null, chatType, size, waitForCompletion, retryCount + 1, onChunk);
+            logInfo('Пересоздаем чат под следующим доступным аккаунтом после rate limit');
+            return retryAfterAccountSwitch(requestContext, sendMessage);
         }
         return { error: `Все токены заблокированы по лимиту (${hours}ч)`, chatId };
     }
@@ -968,7 +1010,21 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             return response.data;
         }
 
-        return handleApiError(response, tokenObj, message, model, chatId, parentId, files, retryCount, chatType, size, waitForCompletion, onChunk);
+        return handleApiError(response, tokenObj, {
+            message,
+            model,
+            chatId,
+            parentId,
+            files,
+            tools,
+            toolChoice,
+            systemMessage,
+            retryCount,
+            chatType,
+            size,
+            waitForCompletion,
+            onChunk
+        });
     } catch (error) {
         logError('Ошибка при отправке сообщения', error);
         return { error: error.toString(), chatId };
