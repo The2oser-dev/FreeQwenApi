@@ -24,7 +24,7 @@ load_dotenv()
 # CONFIGURATION & CONSTANTS
 # =================================================================
 PORT = int(os.environ.get("PORT", 3264))
-HOST = os.environ.get("HOST", "0.0.0.0")
+HOST = os.environ.get("HOST", "127.0.0.1")
 QWEN_BASE_URL = "https://chat.qwen.ai"
 CHAT_PAGE_URL = f"{QWEN_BASE_URL}/"
 CHAT_API_URL = f"{QWEN_BASE_URL}/api/v2/chat/completions"
@@ -537,7 +537,8 @@ app = FastAPI(title="FreeQwenApi Python")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[origin.strip().rstrip("/") for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip()],
+    allow_origin_regex=r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

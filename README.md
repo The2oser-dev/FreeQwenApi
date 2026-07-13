@@ -98,6 +98,11 @@ npm run auth -- --remove
 - `Authorization.txt`
 - cookies / browser profile / реальные токены
 
+Proxy по умолчанию слушает только `127.0.0.1`. Для намеренного доступа из
+сети задайте `HOST=0.0.0.0`, добавьте отдельные client keys в
+`src/Authorization.txt` и перечислите точные browser-origin через
+`CORS_ORIGINS=https://ui.example.com,http://192.168.1.20:3000`.
+
 ## Основные endpoints
 
 ### Health

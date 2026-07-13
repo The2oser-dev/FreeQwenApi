@@ -27,7 +27,26 @@ test('Node runtime defaults to the current Qwen model when no override is set', 
   assert.equal(stdout, 'qwen3.7-max');
 });
 
-test('route fallbacks use DEFAULT_MODEL instead of the rejected legacy literal', () => {
+test('Node runtime binds to loopback unless HOST is explicitly configured', (t) => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'freeqwen-default-host-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+
+  const configUrl = new URL('../src/config.js', import.meta.url).href;
+  const { HOST: _ignored, ...cleanEnv } = process.env;
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `import { HOST } from ${JSON.stringify(configUrl)}; process.stdout.write(HOST);`
+    ],
+    { cwd, env: cleanEnv, encoding: 'utf8' }
+  );
+
+  assert.equal(stdout, '127.0.0.1');
+});
+
+test('route fallbacks use DEFAULT_MODEL instead of a hardcoded legacy literal', () => {
   const routesSource = readFileSync(path.join(projectRoot, 'src', 'api', 'routes.js'), 'utf8');
   assert.doesNotMatch(routesSource, /qwen-max-latest/);
 });
@@ -37,5 +56,9 @@ test('Python runtime has the same configurable default model', () => {
   assert.match(
     pythonSource,
     /DEFAULT_MODEL\s*=\s*os\.environ\.get\("DEFAULT_MODEL",\s*"qwen3\.7-max"\)/
+  );
+  assert.match(
+    pythonSource,
+    /HOST\s*=\s*os\.environ\.get\("HOST",\s*"127\.0\.0\.1"\)/
   );
 });
