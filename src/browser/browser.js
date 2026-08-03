@@ -1,6 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { saveSession, saveAuthToken } from './session.js';
+import { saveSession, saveAuthToken, loadAnyAccountCookies, loadAuthToken } from './session.js';
 import { startManualAuthentication } from './auth.js';
 import { clearPagePool, getAuthToken } from '../api/chat.js';
 import fs from 'fs';
@@ -29,6 +29,7 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
             headless: !visibleMode,
             slowMo: visibleMode ? 30 : 0,
             executablePath: process.env.CHROME_PATH || undefined,
+            userDataDir: process.env.CHROME_USER_DATA_DIR || undefined,
             args: [
                 '--no-sandbox', '--disable-setuid-sandbox',
                 '--disable-blink-features=AutomationControlled',
@@ -107,6 +108,26 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
         }
         // loadSessionPuppeteer removed — was dead code (always returned false)
 
+        if (!visibleMode) {
+            // Восстанавливаем сохранённую сессию Qwen (cookies + localStorage token),
+            // чтобы headless-браузер выглядел авторизованным для Qwen anti-bot.
+            try {
+                await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
+                const savedCookies = loadAnyAccountCookies();
+                if (savedCookies.length) {
+                    await page.setCookie(...savedCookies);
+                    logInfo(`Восстановлено ${savedCookies.length} cookies сессии Qwen`);
+                }
+                const authToken = loadAuthToken();
+                if (authToken) {
+                    await page.evaluate((t) => { try { localStorage.setItem('token', t); } catch (e) {} }, authToken);
+                    logInfo('Токен Qwen установлен в localStorage');
+                }
+            } catch (restoreError) {
+                logWarn(`Не удалось восстановить сессию Qwen: ${restoreError.message}`);
+            }
+        }
+
         return true;
     } catch (error) {
         logError('Ошибка при инициализации браузера', error);
@@ -151,20 +172,44 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
         console.log('------------------------------------------------------');
         console.log('После успешной авторизации нажмите ENTER для продолжения...');
 
-        await new Promise((resolve) => {
-            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-            process.stdin.resume();
-            process.stdin.setEncoding('utf8');
-            const onData = (key) => {
-                if (key === '\n' || key === '\r' || key.charCodeAt(0) === 13) {
-                    process.stdin.pause();
-                    process.stdin.removeListener('data', onData);
-                    logInfo('Получено подтверждение, продолжаем...');
-                    resolve();
+        // Auto-poll: ждём, пока пользователь войдёт в Qwen (токен появится в localStorage).
+        // Заменяет ручное нажатие ENTER — необходимо для detached/фонового запуска,
+        // чтобы скрипт сам завершился, как только вход обнаружен.
+        const pollTimeoutMs = Number(process.env.QWEN_LOGIN_TIMEOUT) || 300000;
+        const pollDeadline = Date.now() + pollTimeoutMs;
+        logInfo(`Ожидание входа в Qwen (проверка каждые 3 сек, таймаут ${Math.round(pollTimeoutMs / 1000)} сек)...`);
+        let tokenFound = false;
+        while (Date.now() < pollDeadline) {
+            try {
+                const polledToken = await page.evaluate(() => {
+                    const directKeys = ['token', 'auth_token', 'access_token', 'id_token', 'qwen_token'];
+                    for (const key of directKeys) {
+                        const value = localStorage.getItem(key) || sessionStorage.getItem(key);
+                        if (value) return value;
+                    }
+                    const jwtLike = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+                    for (const storage of [localStorage, sessionStorage]) {
+                        for (let i = 0; i < storage.length; i += 1) {
+                            const value = storage.getItem(storage.key(i)) || '';
+                            const match = value.match(jwtLike);
+                            if (match) return match[0];
+                        }
+                    }
+                    return null;
+                });
+                if (polledToken) {
+                    logInfo('Вход в Qwen обнаружен: токен найден в localStorage.');
+                    tokenFound = true;
+                    break;
                 }
-            };
-            process.stdin.on('data', onData);
-        });
+            } catch (pollError) {
+                logDebug(`Опрос localStorage не удался (повтор через 3 сек): ${pollError.message}`);
+            }
+            await delay(3000);
+        }
+        if (!tokenFound) {
+            logWarn('Время ожидания входа истекло. Токен не найден — авторизация не завершена.');
+        }
 
         let cookies = [];
         try {

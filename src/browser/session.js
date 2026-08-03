@@ -106,6 +106,29 @@ export function hasSession(accountId = null) {
     ].some(p => fs.existsSync(p));
 }
 
+// Загружает сохранённые cookies сессии Qwen из любого аккаунта
+// (session/accounts/*/cookies.json). Используется, чтобы headless-браузер
+// выглядел «авторизованным» для Qwen anti-bot (cookies acw_tc/cna/ssxmod_itna/...).
+export function loadAnyAccountCookies() {
+    try {
+        const accountsDir = path.join(SESSION_PATH, 'accounts');
+        if (!fs.existsSync(accountsDir)) return [];
+        for (const entry of fs.readdirSync(accountsDir)) {
+            const cookiesFile = path.join(accountsDir, entry, 'cookies.json');
+            if (fs.existsSync(cookiesFile)) {
+                const cookies = JSON.parse(fs.readFileSync(cookiesFile, 'utf8'));
+                if (Array.isArray(cookies) && cookies.length) {
+                    logInfo(`Загружено ${cookies.length} cookies сессии из аккаунта ${entry}`);
+                    return cookies;
+                }
+            }
+        }
+    } catch (error) {
+        logError('Ошибка при загрузке cookies аккаунтов', error);
+    }
+    return [];
+}
+
 export function saveAuthToken(token) {
     try {
         initSessionDirectory();
