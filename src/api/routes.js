@@ -6,7 +6,7 @@ import { checkAuthentication } from '../browser/auth.js';
 import { logInfo, logError, logDebug } from '../logger/index.js';
 import { getMappedModel } from './modelMapping.js';
 import { getStsToken, uploadFileToQwen } from './fileUpload.js';
-import { loadHistory, saveHistory } from './chatHistory.js';
+import { loadHistory, saveHistory, deleteChat } from './chatHistory.js';
 import { generateImage, getAvailableImageModels, checkImageApiAvailability } from './imageGeneration.js';
 import { MAX_FILE_SIZE, UPLOADS_DIR, DEFAULT_MODEL, STREAMING_CHUNK_DELAY, ALLOW_UNSCOPED_SESSION_CHAT_RESTORE, HOST, PORT } from '../config.js';
 import multer from 'multer';
@@ -304,6 +304,17 @@ function getSavedChatId(req, scope = null) {
 
     return null;
 }
+
+function forgetSavedSessionChat(req) {
+    const savedSession = getSavedChatId(req);
+    if (!savedSession?.chatId) return null;
+
+    if (deleteChat(savedSession.chatId)) {
+        logInfo(`Удалена локальная история сброшенного чата ${savedSession.chatId}`);
+    }
+    return savedSession.chatId;
+}
+
 function saveChatIdForSession(req, chatId, parentId, scope = null) {
     const sessionKey = getScopedSessionKey(req, scope);
     const normalizedScope = normalizeIdValue(scope);
@@ -550,6 +561,41 @@ function shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId) {
 function prepareOpenAIMessageInput(messages, combinedTools, effectiveChatId) {
     const lastUserMessage = (messages || []).filter(msg => msg && msg.role === 'user').pop();
     const nonSystemMessages = (messages || []).filter(msg => msg && msg.role !== 'system');
+
+    // When reusing an existing chat (effectiveChatId set), Qwen already holds the
+    // conversation server-side. Send only the latest user message (or, for an active
+    // tool cycle, only the tail from the last user message) to avoid duplicating the
+    // whole client transcript.
+    if (effectiveChatId) {
+        const lastMsg = nonSystemMessages[nonSystemMessages.length - 1] || null;
+        const lastIsToolResult = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
+        if (lastIsToolResult) {
+            let lastUserIdx = -1;
+            for (let i = (messages || []).length - 1; i >= 0; i--) {
+                if (messages[i] && messages[i].role === 'user') { lastUserIdx = i; break; }
+            }
+            const tail = (messages || []).slice(Math.max(0, lastUserIdx));
+            const tailTranscript = buildStatelessTranscript(tail);
+            const fileMsg = tail.find(m => m && m.role === 'user' && m.files) || lastUserMessage;
+            return {
+                messageContent: tailTranscript,
+                resetMessageContent: null,
+                files: (fileMsg && Array.isArray(fileMsg.files)) ? fileMsg.files : (lastUserMessage?.files || []),
+                folded: true,
+                missingUser: false
+            };
+        }
+        if (lastUserMessage) {
+            return {
+                messageContent: lastUserMessage.content,
+                resetMessageContent: null,
+                files: lastUserMessage.files || [],
+                folded: false,
+                missingUser: false
+            };
+        }
+    }
+
     if (shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId)) {
         const transcript = buildStatelessTranscript(messages);
         return {
@@ -1317,6 +1363,28 @@ router.get('/models', async (req, res) => {
     }
 });
 
+// OpenAI-алиас для получения списка моделей (клиенты ждут GET /v1/models)
+router.get('/v1/models', async (req, res) => {
+    try {
+        const modelsRaw = getAllModels();
+        const openAiModels = {
+            object: 'list',
+            data: modelsRaw.models.map(m => ({
+                id: m.id || m.name || m,
+                object: 'model',
+                created: 0,
+                owned_by: 'qwen',
+                permission: []
+            }))
+        };
+        logInfo(`Возвращено ${openAiModels.data.length} моделей (OpenAI формат, /v1/models)`);
+        res.json(openAiModels);
+    } catch (error) {
+        logError('Ошибка при получении списка моделей (/v1/models)', error);
+        res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+    }
+});
+
 router.post('/v1/messages', handleAnthropicMessages);
 router.post('/messages', handleAnthropicMessages);
 
@@ -1423,20 +1491,21 @@ router.post('/chat/completions', async (req, res) => {
                     logInfo(`Using client conversation-id key: ${effectiveChatId}`);
                 }
             } else if (ALLOW_UNSCOPED_SESSION_CHAT_RESTORE) {
-                const savedSession = forceNewChat ? null : getSavedChatId(req);
-                if (savedSession?.chatId) {
-                    effectiveChatId = savedSession.chatId;
-                    if (!effectiveParentId && savedSession.parentId) {
-                        effectiveParentId = savedSession.parentId;
-                    }
-                    logInfo(`Restored chatId from session: ${effectiveChatId}`);
-                }
-
-                if (!effectiveChatId) {
-                    const generatedId = generateChatIdFromHistory(messages, req);
-                    if (generatedId) {
-                        effectiveChatId = generatedId;
-                        logInfo(`Created new chatId for session: ${effectiveChatId}`);
+                if (forceNewChat) {
+                    // newChat/resetChat: создаём новый чат, удаляем старую локальную историю.
+                    forgetSavedSessionChat(req);
+                    logInfo('Явный сброс чата (newChat/resetChat): создаём новый чат');
+                } else {
+                    // Запрос без chatId: продолжаем сохранённый чат.
+                    const savedSession = getSavedChatId(req);
+                    if (savedSession?.chatId) {
+                        effectiveChatId = savedSession.chatId;
+                        if (!effectiveParentId && savedSession.parentId) {
+                            effectiveParentId = savedSession.parentId;
+                        }
+                        logInfo(`Restored chatId from session: ${effectiveChatId}`);
+                    } else {
+                        logDebug('Нет сохранённого чата — создадим новый');
                     }
                 }
             } else {
@@ -1769,20 +1838,21 @@ router.post('/v1/chat/completions', async (req, res) => {
                     logInfo(`Using client conversation-id key: ${effectiveChatId}`);
                 }
             } else if (ALLOW_UNSCOPED_SESSION_CHAT_RESTORE) {
-                const savedSession = forceNewChat ? null : getSavedChatId(req);
-                if (savedSession?.chatId) {
-                    effectiveChatId = savedSession.chatId;
-                    if (!effectiveParentId && savedSession.parentId) {
-                        effectiveParentId = savedSession.parentId;
-                    }
-                    logInfo(`Restored chatId from session: ${effectiveChatId}`);
-                }
-
-                if (!effectiveChatId) {
-                    const generatedId = generateChatIdFromHistory(messages, req);
-                    if (generatedId) {
-                        effectiveChatId = generatedId;
-                        logInfo(`Created new chatId for session: ${effectiveChatId}`);
+                if (forceNewChat) {
+                    // newChat/resetChat: создаём новый чат, удаляем старую локальную историю.
+                    forgetSavedSessionChat(req);
+                    logInfo('Явный сброс чата (newChat/resetChat): создаём новый чат');
+                } else {
+                    // Запрос без chatId: продолжаем сохранённый чат.
+                    const savedSession = getSavedChatId(req);
+                    if (savedSession?.chatId) {
+                        effectiveChatId = savedSession.chatId;
+                        if (!effectiveParentId && savedSession.parentId) {
+                            effectiveParentId = savedSession.parentId;
+                        }
+                        logInfo(`Restored chatId from session: ${effectiveChatId}`);
+                    } else {
+                        logDebug('Нет сохранённого чата — создадим новый');
                     }
                 }
             } else {
