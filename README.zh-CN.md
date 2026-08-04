@@ -27,8 +27,21 @@ http://localhost:3264/api
 - **多账号**：添加、重新登录、删除、`OK` / `WAIT` / `INVALID` 状态，以及在限流时自动 round-robin 轮换。
 - **文件上传**：用于 Qwen 文件和附件的 upload endpoint。
 - **Open WebUI**：可以连接为 OpenAI-compatible 后端。
-- **Hermes Agent / OpenCode / Claude Code / Codex / OpenClaw / LiteLLM**：为本地 AI agent 提供的现成配置说明，以及 tool-use smoke 测试。
+- **Hermes Agent / OpenCode / Claude Code / OpenClaw / LiteLLM**：为本地 AI agent 提供的现成配置说明，以及 tool-use smoke 测试。
 - **Health/smoke 工具**：`/api/health`、`/api/status`、`/api/models`、`npm run smoke`、`npm run models:sync`。
+- **通过 Qwen 翻译**：`POST /api/v1/translate` 使用你的 Qwen 会话翻译文本，无需单独的翻译服务。
+
+## 通过 Qwen 翻译
+
+`POST /api/v1/translate` 会独立处理每次翻译，不会保留或返回 Qwen chat ID。
+
+```bash
+curl -X POST http://localhost:3264/api/v1/translate \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello world","target":"Chinese","source":"English"}'
+```
+
+字段：`text`（必填，最多 50,000 个字符）、`target`（可选，默认为 `Russian`）、`source` 和 `model`（可选）。也接受 `target_language`、`language` 和 `source_language` 别名。如果 `src/Authorization.txt` 配置了代理密钥，请发送 `Authorization: Bearer <key>`。
 
 ## 快速开始
 
@@ -63,9 +76,9 @@ cp .env.example .env
 
 对 agent 客户端最有用的参数：
 
-- `QWEN_TOOL_PROMPT_MODE=minimal` — 将 OpenAI `tools` / `functions` 紧凑地嵌入到 prompt 中。这是 Hermes、OpenCode、Claude Code、Codex 和 OpenClaw 的最佳模式。
-- `QWEN_MAX_SYSTEM_CHARS=180000` — 对于带有较大 system prompt/tool schemas 的重型 agent 客户端的安全上限。普通聊天可以调低，但 OpenClaw/Claude Code/Codex 最好保持较高。
-- `QWEN_USE_NODE_FETCH=0` — 将请求保留在浏览器 `page.evaluate(fetch)` 内部，这通常更容易通过 Qwen 的反爬虫。调试时可设为 `1`：anti-bot 错误返回更快、Puppeteer 挂起更少，但 Node 侧请求更常遇到 captcha。
+- `QWEN_TOOL_PROMPT_MODE=minimal` — 将 OpenAI `tools` / `functions` 紧凑地嵌入到 prompt 中。这是 Hermes、OpenCode、Claude Code 和 OpenClaw 的推荐模式。
+- `QWEN_MAX_SYSTEM_CHARS=180000` — 针对大型 system prompt/tool schemas 的 agent 客户端经过测试的建议上限。普通聊天可以调低。
+- `QWEN_USE_NODE_FETCH=0` — 保留 browser fetch 作为回退；带流式 callback 的请求仍会先尝试 Node streaming。设为 `1` 时，大多数错误不会回退到 browser fetch。
 - `NON_INTERACTIVE=1` 和 `SKIP_ACCOUNT_MENU=1` — 不带账号菜单启动，适合本地 agent/守护进程。
 
 带注释的完整参数列表见 `.env.example`。
@@ -323,7 +336,7 @@ API Key: dummy-key
 
 完整说明：[docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md)
 
-## 代理与 tool-use：Hermes、OpenCode、Claude Code、Codex、OpenClaw
+## 代理与 tool-use：Hermes、OpenCode、Claude Code、OpenClaw
 
 FreeQwenApi 不仅能做普通聊天，还支持 agent/tool-use 场景。对外表现为 OpenAI/Anthropic-compatible 的 tool calling，内部则通过为 Qwen Chat 生成的系统 prompt 来模拟 tool schemas。
 
@@ -448,31 +461,6 @@ claude --bare -p 'Create smoke.js, run npm run smoke, return the terminal output
 
 在内部，shim 会把 Anthropic 的 `tools`、`tool_use` 和 `tool_result` 转换为 OpenAI 风格的历史记录，再转换回来。
 
-### Codex CLI
-
-当前的 Codex CLI 已不再支持 `wire_api = "chat"`；请使用 Responses API 模式：
-
-```toml
-model = "qwen3.7-max"
-model_provider = "freeqwen"
-approval_policy = "never"
-sandbox_mode = "workspace-write"
-
-[model_providers.freeqwen]
-name = "FreeQwenApi"
-base_url = "http://127.0.0.1:3264/api"
-wire_api = "responses"
-experimental_bearer_token = "dummy-key"
-```
-
-Smoke：
-
-```bash
-CODEX_HOME=/path/to/codex-home \
-codex exec 'Create smoke.js, create package.json with script smoke, run npm run smoke, return output' \
-  --skip-git-repo-check
-```
-
 ### OpenClaw
 
 OpenClaw 最好使用较大的上下文运行——它的 system prompt 和工具列表明显比平时大。
@@ -549,7 +537,7 @@ model_list:
 - 这是 Qwen Chat 的 web proxy，不是官方的 tool-calling API。Tool calls 是通过 prompt adapter 模拟的。
 - 有时 Qwen 的 web 后端会返回 `chatId 不存在`；通常重试请求或开启新的聊天可以解决。
 - 请求频繁/过长时可能出现 anti-bot/captcha 挑战。
-- 对于 OpenClaw/Codex/Claude Code，请保持 `QWEN_MAX_SYSTEM_CHARS=180000`，否则工具指令可能被截断。
+- 对于 OpenClaw/Claude Code，请保持 `QWEN_MAX_SYSTEM_CHARS=180000`，否则工具指令可能被截断。
 - 如果 agent 只是写文本而不是调用工具，请检查客户端是否真的传了 `tools`，且服务器是否以 `QWEN_TOOL_PROMPT_MODE=minimal` 启动。
 
 ## Docker
@@ -575,6 +563,7 @@ services:
     environment:
       - SKIP_ACCOUNT_MENU=true
       - PORT=3264
+      - HOST=0.0.0.0
     ports:
       - "3264:3264"
     volumes:
@@ -618,7 +607,7 @@ curl http://localhost:3264/api/videos/status
 - [IMAGE_VIDEO_GENERATION_GUIDE.md](IMAGE_VIDEO_GENERATION_GUIDE.md) — 通过 `chatType` 生成图像和视频。
 - [docs/IMAGE_GENERATION.md](docs/IMAGE_GENERATION.md) — DashScope/Qwen Image endpoints。
 - [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md) — 连接 Open WebUI。
-- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider；OpenCode、Claude Code、Codex 和 OpenClaw 见上面的章节。
+- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider；OpenCode、Claude Code 和 OpenClaw 见上面的章节。
 - [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml) — LiteLLM bridge。
 
 ## 限制

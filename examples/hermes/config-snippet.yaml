@@ -12,6 +12,6 @@ custom_providers:
 #
 # Проверка tools/skills:
 # hermes chat --provider custom:qwen-free --model qwen3.7-max \
-#   -q 'Как настроить Hermes Agent gateway для messaging? Сначала используй нужный skill.'
+#   -q 'How do I configure the Hermes Agent gateway? Use the required skill first.'
 #
 # Ожидаемо: Hermes должен показать вызов skill_view, затем ответить по результату skill.

@@ -14,6 +14,7 @@ test('account-switch retry resets Qwen chat ownership and preserves agent contex
   const onChunk = () => {};
   const resetMessage = 'User: Read the file';
   const clientScope = 'proxy-client-scope-a';
+  const onReasoningChunk = () => {};
   const requestContext = {
     message: 'Read the file',
     model: 'qwen3.7-max',
@@ -29,7 +30,9 @@ test('account-switch retry resets Qwen chat ownership and preserves agent contex
     retryCount: 2,
     onChunk,
     resetMessage,
-    clientScope
+    clientScope,
+    thinkingEnabled: true,
+    onReasoningChunk
   };
 
   let receivedArgs;
@@ -55,7 +58,9 @@ test('account-switch retry resets Qwen chat ownership and preserves agent contex
     3,
     onChunk,
     resetMessage,
-    clientScope
+    clientScope,
+    true,
+    onReasoningChunk
   ]);
 });
 
@@ -75,6 +80,8 @@ test('account-switch retry helper uses safe sendMessage defaults', () => {
     1,
     null,
     null,
+    null,
+    false,
     null
   ]);
 });

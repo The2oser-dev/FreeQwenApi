@@ -48,6 +48,13 @@ function isBrowserAccountId(accountId) {
     return typeof accountId === 'string' && accountId.startsWith('browser:');
 }
 
+function getQwenRequestTimeout() {
+    const configured = Number(process.env.QWEN_REQUEST_TIMEOUT);
+    return Number.isFinite(configured) && configured >= 1000
+        ? Math.min(configured, 1800000)
+        : 120000;
+}
+
 export function getManagedAccountId(storedAccountId) {
     if (storedAccountId === null || storedAccountId === undefined) return null;
     const normalized = String(storedAccountId).trim();
@@ -756,10 +763,12 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
 
         const requestUrl = buildQwenCompletionUrl(apiUrl, payload?.chat_id);
 
+        const timeoutMs = getQwenRequestTimeout();
         const response = await fetch(requestUrl, {
             method: 'POST',
             headers: buildQwenRequestHeaders(token),
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(timeoutMs)
         });
 
         if (!response.ok) {
@@ -923,13 +932,19 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
     logDebug(`API URL: ${apiUrl}`);
 
     return page.evaluate(async (data) => {
+        let timeout = null;
         try {
+            const controller = new AbortController();
+            timeout = setTimeout(() => controller.abort(), data.timeoutMs);
             const response = await fetch(data.apiUrl, {
                 method: 'POST',
                 credentials: data.credentials,
                 headers: data.headers,
-                body: JSON.stringify(data.payload)
+                body: JSON.stringify(data.payload),
+                signal: controller.signal
             });
+            clearTimeout(timeout);
+            timeout = null;
 
             if (response.ok) {
                 if (data.payload.stream === false) {
@@ -1047,8 +1062,10 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
             return { success: false, status: response.status, statusText: response.statusText, errorBody };
         } catch (error) {
             return { success: false, error: error.toString() };
+        } finally {
+            if (timeout) clearTimeout(timeout);
         }
-    }, requestBody);
+    }, { ...requestBody, timeoutMs: getQwenRequestTimeout() });
 }
 
 export function buildAccountSwitchRetryArgs(requestContext = {}) {
@@ -1327,8 +1344,8 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             payload,
             tokenObj.token,
             onChunk,
-            onReasoningChunk,
-            getBrowserFetchCredentials(tokenObj.id)
+            getBrowserFetchCredentials(tokenObj.id),
+            onReasoningChunk
         );
 
         if (response.success && response.isTask) {

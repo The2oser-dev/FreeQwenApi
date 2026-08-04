@@ -1,6 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { saveSession, saveAuthToken, loadAnyAccountCookies, loadAuthToken } from './session.js';
+import { saveSession, saveAuthToken, loadAccountCookies, loadAuthToken } from './session.js';
 import { startManualAuthentication } from './auth.js';
 import { clearPagePool, getAuthToken } from '../api/chat.js';
 import fs from 'fs';
@@ -112,8 +112,9 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
             // Восстанавливаем сохранённую сессию Qwen (cookies + localStorage token),
             // чтобы headless-браузер выглядел авторизованным для Qwen anti-bot.
             try {
-                await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
-                const savedCookies = loadAnyAccountCookies();
+                const restoredAccountId = process.env.QWEN_BROWSER_ACCOUNT_ID || null;
+                await page.goto(new URL(CHAT_PAGE_URL).origin, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
+                const savedCookies = loadAccountCookies(restoredAccountId);
                 if (savedCookies.length) {
                     await page.setCookie(...savedCookies);
                     logInfo(`Восстановлено ${savedCookies.length} cookies сессии Qwen`);
@@ -123,6 +124,7 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
                     await page.evaluate((t) => { try { localStorage.setItem('token', t); } catch (e) {} }, authToken);
                     logInfo('Токен Qwen установлен в localStorage');
                 }
+                await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
             } catch (restoreError) {
                 logWarn(`Не удалось восстановить сессию Qwen: ${restoreError.message}`);
             }
@@ -131,6 +133,7 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
         return true;
     } catch (error) {
         logError('Ошибка при инициализации браузера', error);
+        await shutdownBrowser();
         return false;
     }
 }
@@ -175,7 +178,10 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
         // Auto-poll: ждём, пока пользователь войдёт в Qwen (токен появится в localStorage).
         // Заменяет ручное нажатие ENTER — необходимо для detached/фонового запуска,
         // чтобы скрипт сам завершился, как только вход обнаружен.
-        const pollTimeoutMs = Number(process.env.QWEN_LOGIN_TIMEOUT) || 300000;
+        const configuredTimeout = Number(process.env.QWEN_LOGIN_TIMEOUT);
+        const pollTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout >= 10000
+            ? Math.min(configuredTimeout, 1800000)
+            : 300000;
         const pollDeadline = Date.now() + pollTimeoutMs;
         logInfo(`Ожидание входа в Qwen (проверка каждые 3 сек, таймаут ${Math.round(pollTimeoutMs / 1000)} сек)...`);
         let tokenFound = false;
@@ -208,7 +214,7 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
             await delay(3000);
         }
         if (!tokenFound) {
-            logWarn('Время ожидания входа истекло. Токен не найден — авторизация не завершена.');
+            throw new Error('Время ожидания входа истекло. Токен не найден.');
         }
 
         let cookies = [];
@@ -252,6 +258,10 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
                 logInfo(`Токен найден в cookie: ${tokenCookie.name}`);
                 saveAuthToken(tokenCookie.value);
             }
+        }
+
+        if (!token && !cookies.some(c => c.name.toLowerCase().includes('token') || c.name.toLowerCase().includes('auth'))) {
+            throw new Error('Токен Qwen не найден после авторизации');
         }
 
         try {

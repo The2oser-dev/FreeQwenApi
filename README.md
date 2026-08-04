@@ -40,7 +40,7 @@ curl -X POST http://localhost:3264/api/v1/translate \
   -d '{"text":"Hello world","target":"Russian","source":"English"}'
 ```
 
-Ответ:
+Response:
 
 ```json
 {
@@ -168,7 +168,7 @@ curl http://localhost:3264/api/chat/completions \
   -d '{
     "model": "qwen3.7-max",
     "messages": [
-      {"role": "user", "content": "Ответь коротко: что такое FreeQwenApi?"}
+      {"role": "user", "content": "Briefly explain what FreeQwenApi is."}
     ],
     "stream": false
   }'
@@ -186,7 +186,7 @@ const openai = new OpenAI({
 
 const response = await openai.chat.completions.create({
   model: 'qwen3.7-max',
-  messages: [{ role: 'user', content: 'Привет!' }]
+  messages: [{ role: 'user', content: 'Hello!' }]
 });
 
 console.log(response.choices[0].message.content);
@@ -204,7 +204,7 @@ curl http://localhost:3264/api/chat/completions \
   -d '{
     "model": "qwen3.7-max",
     "enable_thinking": true,
-    "messages": [{"role": "user", "content": "Разбери задачу по шагам."}],
+    "messages": [{"role": "user", "content": "Solve the task step by step."}],
     "stream": true
   }'
 ```
@@ -222,8 +222,8 @@ Priority: `enable_thinking` → `reasoning_effort` → `thinking` (the first exp
 In a streaming response (`stream: true`), the reasoning arrives in separate SSE chunks as `delta.reasoning_content` (just like `delta.content` for normal text):
 
 ```text
-data: {"choices":[{"delta":{"reasoning_content":"1. Сначала разберём...","content":""}}]}
-data: {"choices":[{"delta":{"content":"Итоговый ответ...","reasoning_content":""}}]}
+data: {"choices":[{"delta":{"reasoning_content":"1. First, analyze...","content":""}}]}
+data: {"choices":[{"delta":{"content":"Final answer...","reasoning_content":""}}]}
 data: [DONE]
 ```
 
@@ -235,12 +235,12 @@ OpenAI SDK (stream):
 const stream = await openai.chat.completions.create({
   model: "qwen3.7-max",
   enable_thinking: true,
-  messages: [{ role: "user", content: "Разбери задачу по шагам." }],
+  messages: [{ role: "user", content: "Solve the task step by step." }],
   stream: true
 });
 for await (const chunk of stream) {
   const d = chunk.choices[0]?.delta;
-  if (d?.reasoning_content) console.log("[рассуждение]", d.reasoning_content);
+  if (d?.reasoning_content) console.log("[reasoning]", d.reasoning_content);
   if (d?.content) console.log(d.content);
 }
 ```
@@ -253,7 +253,7 @@ By default `/api/images/generations` uses **Qwen Chat**, not DashScope. That mea
 curl http://localhost:3264/api/images/generations \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Кинематографичный робот в неоновом Токио, стиль sci-fi poster",
+    "prompt": "A cinematic robot in neon Tokyo, sci-fi poster style",
     "model": "qwen3-vl-plus",
     "size": "16:9"
   }'
@@ -300,7 +300,7 @@ Create a video and wait for the result on the server:
 curl http://localhost:3264/api/videos/generations \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Камера медленно приближается к футуристическому городу ночью, cinematic, 5 seconds",
+    "prompt": "The camera slowly approaches a futuristic city at night, cinematic, 5 seconds",
     "model": "qwen3-vl-plus",
     "size": "16:9",
     "wait": true
@@ -313,7 +313,7 @@ If you don't want to keep the HTTP connection open:
 curl http://localhost:3264/api/videos/generations \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Робот идёт под дождём в неоновом городе",
+    "prompt": "A robot walks through rain in a neon city",
     "size": "16:9",
     "wait": false
   }'
@@ -376,7 +376,7 @@ curl http://127.0.0.1:3264/api/chat/completions \
   -d '{
     "model": "qwen3.7-max",
     "stream": false,
-    "messages": [{"role":"user","content":"Вызови инструмент write_file для smoke.js"}],
+    "messages": [{"role":"user","content":"Call the write_file tool for smoke.js"}],
     "tools": [{
       "type": "function",
       "function": {
@@ -550,7 +550,7 @@ Ready-made example: [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_l
 ### Important caveats for agents
 
 - This is a Qwen Chat web proxy, not an official tool-calling API. Tool calls are emulated by a prompt adapter.
-- Sometimes the Qwen web backend returns `chatId не существует`; usually a request retry or a new chat helps.
+- Sometimes the Qwen web backend reports that the `chatId` does not exist; usually a request retry or a new chat helps.
 - With frequent/long requests, an anti-bot/captcha challenge is possible.
 - For OpenClaw/Claude Code keep `QWEN_MAX_SYSTEM_CHARS=180000`, otherwise tool instructions may be truncated.
 - If the agent writes text instead of calling a tool, check that the client really passed `tools`, and that the server runs with `QWEN_TOOL_PROMPT_MODE=minimal`.

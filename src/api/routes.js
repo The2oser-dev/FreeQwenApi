@@ -397,6 +397,15 @@ router.use((req, res, next) => {
     req.url = req.url.replace(/\/v[12](?=\/|$)/g, '').replace(/\/+/g, '/');
     next();
 });
+router.use((req, res, next) => {
+    if (req.method === 'POST' && req.body?.model !== undefined
+        && (typeof req.body.model !== 'string' || !req.body.model.trim())) {
+        return res.status(400).json({
+            error: { message: 'model must be a non-empty string', type: 'invalid_request_error' }
+        });
+    }
+    next();
+});
 router.use(async (req, res, next) => {
     const isChatRequest = req.method === 'POST' && ['/chat', '/chat/completions'].includes(req.path);
     if (!isChatRequest || isOpenWebUiMetaRequest(req.body?.messages)) return next();
@@ -1101,7 +1110,12 @@ function handleNonStreamingResponse(res, result, mappedModel) {
 router.post('/chat', async (req, res) => {
     try {
         const { message, messages, model, chatId, parentId, stream, chatType, size, waitForCompletion } = req.body;
-        const thinkingEnabled = resolveThinkingEnabled(req.body);
+        let thinkingEnabled;
+        try {
+            thinkingEnabled = resolveThinkingEnabled(req.body);
+        } catch (error) {
+            return res.status(400).json({ error: { message: error.message, type: 'invalid_request_error' } });
+        }
 
         // Поддержка как message, так и messages для совместимости
         let messageContent = message;
@@ -1928,7 +1942,12 @@ router.post('/chat/completions', async (req, res) => {
 router.post('/v1/chat/completions', async (req, res) => {
     try {
         const { messages, model, stream, tools, functions, tool_choice, chatId } = req.body;
-        const thinkingEnabled = resolveThinkingEnabled(req.body);
+        let thinkingEnabled;
+        try {
+            thinkingEnabled = resolveThinkingEnabled(req.body);
+        } catch (error) {
+            return res.status(400).json({ error: { message: error.message, type: 'invalid_request_error' } });
+        }
         const snakeCaseChatId = normalizeIdValue(req.body?.chat_id);
         const explicitChatId = normalizeIdValue(chatId) || snakeCaseChatId;
         const explicitParentId = extractParentHint(req);
@@ -2068,6 +2087,12 @@ router.post('/v1/chat/completions', async (req, res) => {
 
             const writeSse = (payload) => {
                 res.write('data: ' + JSON.stringify(payload) + '\n\n');
+            };
+            const streamBase = {
+                id: 'chatcmpl-' + crypto.randomUUID(),
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: mappedModel || DEFAULT_MODEL
             };
 
             try {

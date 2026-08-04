@@ -238,6 +238,12 @@ export const MODEL_MAPPING = buildModelMapping();
 export function getMappedModel(requestedModel, defaultModel = DEFAULT_MODEL) {
     if (!requestedModel) return defaultModel;
 
+    if (typeof requestedModel !== 'string') {
+        throw new TypeError('model must be a non-empty string');
+    }
+    requestedModel = requestedModel.trim();
+    if (!requestedModel) return defaultModel;
+
     // Проверяем точное соответствие в словаре
     if (MODEL_MAPPING[requestedModel]) {
         return MODEL_MAPPING[requestedModel];
@@ -251,4 +257,4 @@ export function getMappedModel(requestedModel, defaultModel = DEFAULT_MODEL) {
 
     // Передаём незнакомую модель как есть — Qwen Chat сам проверит доступность.
     return requestedModel;
-} 
+}

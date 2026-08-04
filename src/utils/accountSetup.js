@@ -5,7 +5,6 @@ import { fileURLToPath } from 'url';
 import { initBrowser, shutdownBrowser, getBrowserContext } from '../browser/browser.js';
 import { extractAuthToken } from '../api/chat.js';
 import { loadTokens, saveTokens, markValid, removeToken } from '../api/tokenManager.js';
-import { loadAuthToken } from '../browser/session.js';
 import { logInfo, logError, logWarn } from '../logger/index.js';
 import { prompt } from './prompt.js';
 import { SESSION_DIR, ACCOUNTS_DIR } from '../config.js';
@@ -32,11 +31,6 @@ export async function addAccountInteractive() {
 
     const ctx = getBrowserContext();
     let token = await extractAuthToken(ctx, true);
-
-    if (!token) {
-        token = loadAuthToken();
-        if (token) logInfo('Токен получен из сохранённого файла.');
-    }
 
     if (!token) {
         logError('Токен не был получен. Аккаунт не добавлен.');
