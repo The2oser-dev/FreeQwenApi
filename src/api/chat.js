@@ -644,14 +644,14 @@ export function preflightFileRequest(messageContent, files = null, clientScope =
     return { fileAffinity };
 }
 
-function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice, chatType = 't2t', size = null) {
+function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice, chatType = 't2t', size = null, thinkingEnabled = false) {
     const userMessageId = crypto.randomUUID();
     const assistantChildId = crypto.randomUUID();
 
     const isVideo = chatType === 't2v';
 
     const featureConfig = {
-        thinking_enabled: isVideo,
+        thinking_enabled: isVideo || thinkingEnabled,
         output_schema: 'phase'
     };
     if (isVideo) {
@@ -659,6 +659,8 @@ function buildPayloadV2(messageContent, model, chatId, parentId, files, systemMe
         featureConfig.auto_thinking = true;
         featureConfig.thinking_format = 'summary';
         featureConfig.auto_search = true;
+    } else if (thinkingEnabled) {
+        featureConfig.thinking_format = 'summary';
     }
 
     const newMessage = {
@@ -747,7 +749,7 @@ function parseNonSseCompletionBody(body) {
     return { success: false, error: 'Unexpected non-SSE 200 response', errorBody: body };
 }
 
-async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk) {
+async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk, onReasoningChunk = null) {
     try {
         if (!token) return { success: false, error: 'Токен авторизации не найден' };
         if (typeof fetch !== 'function') return { success: false, error: 'Fetch API is unavailable' };
@@ -799,6 +801,7 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
         let finished = false;
         let streamError = null;
         let hasStreamedChunks = false;
+        let reasoningContent = '';
 
         while (!finished) {
             const { done, value } = await reader.read();
@@ -845,6 +848,13 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
                                 hasStreamedChunks = true;
                             }
                         }
+                        if (delta && delta.reasoning_content) {
+                            reasoningContent += delta.reasoning_content;
+                            if (typeof onReasoningChunk === 'function') {
+                                onReasoningChunk(delta.reasoning_content);
+                                hasStreamedChunks = true;
+                            }
+                        }
                         if (delta && delta.status === 'finished') finished = true;
                         if (chunk.choices[0].finish_reason) finished = true;
                     }
@@ -869,6 +879,7 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
                 object: 'chat.completion',
                 created: Math.floor(Date.now() / 1000),
                 model: payload.model,
+                reasoning_content: reasoningContent,
                 choices: [{ index: 0, message: { role: 'assistant', content: fullContent }, finish_reason: 'stop' }],
                 usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
                 response_id: responseId
@@ -889,10 +900,10 @@ export function shouldReturnNodeStreamingResponse(streamedResponse, preferNodeFe
     );
 }
 
-async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, credentials = 'omit') {
+async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, credentials = 'omit', onReasoningChunk = null) {
     const preferNodeFetch = String(process.env.QWEN_USE_NODE_FETCH || '').toLowerCase() === '1' || String(process.env.QWEN_USE_NODE_FETCH || '').toLowerCase() === 'true';
     if (payload?.stream !== false && (typeof onChunk === 'function' || preferNodeFetch)) {
-        const streamedResponse = await executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk);
+        const streamedResponse = await executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk, onReasoningChunk);
 
         if (shouldReturnNodeStreamingResponse(streamedResponse, preferNodeFetch)) {
             return streamedResponse;
@@ -969,6 +980,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let fullContent = '';
+                let reasoningContent = '';
                 let responseId = null;
                 let usage = null;
                 let finished = false;
@@ -1003,6 +1015,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                             if (chunk.choices && chunk.choices[0]) {
                                 const delta = chunk.choices[0].delta;
                                 if (delta && delta.content) fullContent += delta.content;
+                                if (delta && delta.reasoning_content) reasoningContent += delta.reasoning_content;
                                 if (delta && delta.status === 'finished') finished = true;
                             }
                             if (chunk.usage) usage = chunk.usage;
@@ -1022,6 +1035,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                         object: 'chat.completion',
                         created: Math.floor(Date.now() / 1000),
                         model: data.payload.model,
+                        reasoning_content: reasoningContent,
                         choices: [{ index: 0, message: { role: 'assistant', content: fullContent }, finish_reason: 'stop' }],
                         usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
                         response_id: responseId
@@ -1051,7 +1065,9 @@ export function buildAccountSwitchRetryArgs(requestContext = {}) {
         retryCount = 0,
         onChunk = null,
         resetMessage = null,
-        clientScope = null
+        clientScope = null,
+        thinkingEnabled = false,
+        onReasoningChunk = null
     } = requestContext;
 
     return [
@@ -1069,7 +1085,9 @@ export function buildAccountSwitchRetryArgs(requestContext = {}) {
         retryCount + 1,
         onChunk,
         resetMessage,
-        clientScope
+        clientScope,
+        thinkingEnabled,
+        onReasoningChunk
     ];
 }
 
@@ -1171,7 +1189,7 @@ async function handleApiError(response, tokenObj, requestContext) {
 
 // ─── Main public API ─────────────────────────────────────────────────────────
 
-export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null, parentId = null, files = null, tools = null, toolChoice = null, systemMessage = null, chatType = 't2t', size = null, waitForCompletion = true, retryCount = 0, onChunk = null, resetMessage = null, clientScope = null) {
+export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null, parentId = null, files = null, tools = null, toolChoice = null, systemMessage = null, chatType = 't2t', size = null, waitForCompletion = true, retryCount = 0, onChunk = null, resetMessage = null, clientScope = null, thinkingEnabled = false, onReasoningChunk = null) {
     if (!availableModels) availableModels = getAvailableModelsFromFile();
 
     const validated = validateAndPrepareMessage(message);
@@ -1187,8 +1205,7 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
     if (!model || model.trim() === '') {
         model = DEFAULT_MODEL;
     } else if (!isValidModel(model)) {
-        logWarn(`Модель "${model}" не найдена в списке доступных. Используется модель по умолчанию.`);
-        model = DEFAULT_MODEL;
+        logInfo(`Модель "${model}" не в локальном списке — передаём как есть (Qwen Chat проверит доступность).`);
     }
     logInfo(`Используемая модель: "${model}"`);
     if (chatType !== 't2t') {
@@ -1270,7 +1287,9 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
         resetMessage,
         fileAccountId: fileAffinity.accountId,
         browserContext,
-        clientScope
+        clientScope,
+        thinkingEnabled,
+        onReasoningChunk
     };
 
     if (!chatId) {
@@ -1297,7 +1316,7 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
 
         logInfo('Отправка запроса к API v2...');
 
-        const payload = buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice, chatType, size);
+        const payload = buildPayloadV2(messageContent, model, chatId, parentId, files, systemMessage, tools, toolChoice, chatType, size, thinkingEnabled);
         logDebug('=== PAYLOAD V2 ===\n' + JSON.stringify(payload, null, 2));
         logDebug(`Отправка сообщения в чат ${chatId} с parent_id: ${parentId || 'null'}`);
 
@@ -1308,6 +1327,7 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             payload,
             tokenObj.token,
             onChunk,
+            onReasoningChunk,
             getBrowserFetchCredentials(tokenObj.id)
         );
 
@@ -1392,10 +1412,17 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             response.data.chatId = chatId;
             response.data.parentId = response.data.response_id;
             response.data.id = response.data.id || 'chatcmpl-' + Date.now();
+            response.data.reasoning_content = response.data.reasoning_content || response.data.choices?.[0]?.message?.reasoning_content || '';
+            if (response.data.reasoning_content && response.data.choices?.[0]?.message) {
+                response.data.choices[0].message.reasoning_content = response.data.reasoning_content;
+            }
             
             // Fallback: если поток чанков не был отдан, отправляем контент единым куском.
             if (typeof onChunk === 'function' && response.data.choices?.[0]?.message?.content && !response.hasStreamedChunks) {
                 onChunk(response.data.choices[0].message.content);
+            }
+            if (typeof onReasoningChunk === 'function' && response.data.reasoning_content && !response.hasStreamedChunks) {
+                onReasoningChunk(response.data.reasoning_content);
             }
             
             return response.data;

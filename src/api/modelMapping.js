@@ -249,6 +249,6 @@ export function getMappedModel(requestedModel, defaultModel = DEFAULT_MODEL) {
         return requestedModel;
     }
 
-    // Возвращаем модель по умолчанию, если соответствие не найдено
-    return defaultModel;
+    // Передаём незнакомую модель как есть — Qwen Chat сам проверит доступность.
+    return requestedModel;
 } 

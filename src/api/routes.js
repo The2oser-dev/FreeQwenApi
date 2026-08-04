@@ -1090,9 +1090,30 @@ function handleNonStreamingResponse(res, result, mappedModel) {
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
+function resolveThinkingEnabled(body) {
+    const b = body || {};
+    if (b.enable_thinking !== undefined) {
+        const v = b.enable_thinking;
+        return v === true || (typeof v === "string" && ["true","1","yes","on"].includes(v.toLowerCase()));
+    }
+    if (b.reasoning_effort !== undefined) {
+        const e = String(b.reasoning_effort).toLowerCase();
+        return !(e === "none" || e === "off" || e === "disabled" || e === "");
+    }
+    if (b.thinking !== undefined) {
+        if (typeof b.thinking === "boolean") return b.thinking;
+        if (b.thinking && typeof b.thinking === "object") {
+            const ty = String(b.thinking.type || "").toLowerCase();
+            return ty === "enabled" || ty === "on";
+        }
+    }
+    return false;
+}
+
 router.post('/chat', async (req, res) => {
     try {
         const { message, messages, model, chatId, parentId, stream, chatType, size, waitForCompletion } = req.body;
+        const thinkingEnabled = resolveThinkingEnabled(req.body);
 
         // Поддержка как message, так и messages для совместимости
         let messageContent = message;
@@ -1173,6 +1194,20 @@ router.post('/chat', async (req, res) => {
                         });
                     };
                 }
+                let reasoningCallback = null;
+                if (stream) {
+                    reasoningCallback = (reasoning) => {
+                        writeSse({
+                            id: "chatcmpl-" + Date.now(),
+                            object: "chat.completion.chunk",
+                            created: Math.floor(Date.now() / 1000),
+                            model: mappedModel || DEFAULT_MODEL,
+                            choices: [
+                                { index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }
+                            ]
+                        });
+                    };
+                }
 
                 const result = await sendMessage(
                     messageContent,
@@ -1189,7 +1224,9 @@ router.post('/chat', async (req, res) => {
                     0,
                     streamingCallback,
                     resetMessageContent,
-                    getSessionKey(req)
+                    getSessionKey(req),
+                    thinkingEnabled,
+                    reasoningCallback
                 );
 
                 if (!isMeta && result.chatId) {
@@ -1277,7 +1314,8 @@ router.post('/chat', async (req, res) => {
             0,
             null,
             resetMessageContent,
-            getSessionKey(req)
+            getSessionKey(req),
+            thinkingEnabled
         );
 
         if (!isMeta && result.chatId) {
@@ -1450,6 +1488,7 @@ router.get('/chat/completions', (req, res) => {
 router.post('/chat/completions', async (req, res) => {
     try {
         const { messages, model, stream, tools, functions, tool_choice, chatId } = req.body;
+        const thinkingEnabled = resolveThinkingEnabled(req.body);
         const snakeCaseChatId = normalizeIdValue(req.body?.chat_id);
         const explicitChatId = normalizeIdValue(chatId) || snakeCaseChatId;
         const explicitParentId = extractParentHint(req);
@@ -1609,6 +1648,20 @@ router.post('/chat/completions', async (req, res) => {
                         });
                     };
                 }
+                let reasoningCallback = null;
+                if (stream) {
+                    reasoningCallback = (reasoning) => {
+                        writeSse({
+                            id: "chatcmpl-" + Date.now(),
+                            object: "chat.completion.chunk",
+                            created: Math.floor(Date.now() / 1000),
+                            model: mappedModel || DEFAULT_MODEL,
+                            choices: [
+                                { index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }
+                            ]
+                        });
+                    };
+                }
 
                 const result = await sendMessage(
                     messageContent,
@@ -1625,7 +1678,9 @@ router.post('/chat/completions', async (req, res) => {
                     0,
                     streamingCallback,
                     preparedInput.resetMessageContent,
-                    getSessionKey(req)
+                    getSessionKey(req),
+                    thinkingEnabled,
+                    reasoningCallback
                 );
 
                 // Persist ownership before any response path can return early
@@ -1727,7 +1782,8 @@ router.post('/chat/completions', async (req, res) => {
                 0,
                 null,
                 preparedInput.resetMessageContent,
-                getSessionKey(req)
+                getSessionKey(req),
+                thinkingEnabled
             );
 
             // Сохраняем chatId в сессию для следующих запросов
@@ -1796,6 +1852,7 @@ router.post('/chat/completions', async (req, res) => {
 router.post('/v1/chat/completions', async (req, res) => {
     try {
         const { messages, model, stream, tools, functions, tool_choice, chatId } = req.body;
+        const thinkingEnabled = resolveThinkingEnabled(req.body);
         const snakeCaseChatId = normalizeIdValue(req.body?.chat_id);
         const explicitChatId = normalizeIdValue(chatId) || snakeCaseChatId;
         const explicitParentId = extractParentHint(req);
@@ -1959,7 +2016,21 @@ router.post('/v1/chat/completions', async (req, res) => {
                         });
                     };
                 }
-                
+                let reasoningCallback = null;
+                if (stream) {
+                    reasoningCallback = (reasoning) => {
+                        writeSse({
+                            id: "chatcmpl-" + Date.now(),
+                            object: "chat.completion.chunk",
+                            created: Math.floor(Date.now() / 1000),
+                            model: mappedModel || DEFAULT_MODEL,
+                            choices: [
+                                { index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }
+                            ]
+                        });
+                    };
+                }
+
                 const result = await sendMessage(
                     messageContent,
                     mappedModel,
@@ -1975,7 +2046,9 @@ router.post('/v1/chat/completions', async (req, res) => {
                     0,
                     streamingCallback,
                     preparedInput.resetMessageContent,
-                    getSessionKey(req)
+                    getSessionKey(req),
+                    thinkingEnabled,
+                    reasoningCallback
                 );
 
                 // Persist ownership before any response path can return early
@@ -2078,7 +2151,8 @@ router.post('/v1/chat/completions', async (req, res) => {
                 0,
                 null,
                 preparedInput.resetMessageContent,
-                getSessionKey(req)
+                getSessionKey(req),
+                thinkingEnabled
             );
 
             // Сохраняем chatId в сессии для следующих запросов
