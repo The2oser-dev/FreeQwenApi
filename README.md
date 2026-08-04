@@ -1,10 +1,8 @@
 # FreeQwenApi
 **🌍 Language / Язык / 语言 / Idioma:** [English](README.md) · [Русский](README.ru.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md)
 
-
-
 > **A local OpenAI-compatible proxy to Qwen Chat**.  
-> Text, Qwen 3.7 models, files, Open WebUI, Hermes/LiteLLM, and now also image and video generation via Qwen Chat.
+> Text, translation, Qwen models, files, Open WebUI, Hermes/LiteLLM, and image and video generation via Qwen Chat.
 
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
 ![Qwen](https://img.shields.io/badge/Qwen-Chat-purple)
@@ -28,8 +26,33 @@ This is **not a local model on your GPU** and **not the official Alibaba/Qwen AP
 - **Multi-accounts**: adding, re-login, removal, `OK` / `WAIT` / `INVALID` statuses, automatic round-robin rotation on limits.
 - **File upload**: upload endpoint for Qwen files and attachments.
 - **Open WebUI**: can be connected as an OpenAI-compatible backend.
-- **Hermes Agent / OpenCode / Claude Code / Codex / OpenClaw / LiteLLM**: ready-made instructions for local AI agents and tool-use smoke tests.
+- **Hermes Agent / OpenCode / Claude Code / OpenClaw / LiteLLM**: ready-made instructions for local AI agents and tool-use smoke tests.
 - **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
+- **Translation via Qwen**: `POST /api/v1/translate` translates text through your Qwen session without a separate translation provider.
+
+## Translation via Qwen
+
+`POST /api/v1/translate` translates one independent request through your Qwen session. The endpoint does not retain or return a Qwen chat ID.
+
+```bash
+curl -X POST http://localhost:3264/api/v1/translate \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello world","target":"Russian","source":"English"}'
+```
+
+Ответ:
+
+```json
+{
+  "object": "translate",
+  "model": "qwen3.7-max",
+  "source_language": "English",
+  "target_language": "Russian",
+  "translated_text": "Привет, мир"
+}
+```
+
+Fields: `text` (required, up to 50,000 characters), `target` (optional, defaults to `Russian`), `source` (optional), and `model` (optional Qwen model ID). Aliases `target_language`, `language`, and `source_language` are accepted. If `src/Authorization.txt` contains proxy keys, send one as `Authorization: Bearer <key>`.
 
 ## Quick start
 
@@ -64,9 +87,9 @@ cp .env.example .env
 
 The most useful settings for agent clients:
 
-- `QWEN_TOOL_PROMPT_MODE=minimal` — compactly embeds OpenAI `tools` / `functions` into the prompt. This is the best mode for Hermes, OpenCode, Claude Code, Codex and OpenClaw.
-- `QWEN_MAX_SYSTEM_CHARS=180000` — a safe limit for heavy agent clients with large system prompt/tool schemas. For ordinary chat you can lower it, but for OpenClaw/Claude Code/Codex it's better to keep it high.
-- `QWEN_USE_NODE_FETCH=0` — keeps requests inside the browser `page.evaluate(fetch)`, which usually passes Qwen anti-bot better. For debugging you can set `1`: anti-bot errors return faster and there are fewer Puppeteer hangs, but Node-side requests get captchas more often.
+- `QWEN_TOOL_PROMPT_MODE=minimal` — compactly embeds OpenAI `tools` / `functions` into the prompt. This is the recommended mode for Hermes, OpenCode, Claude Code and OpenClaw.
+- `QWEN_MAX_SYSTEM_CHARS=180000` — the recommended tested limit for agent clients with large system prompts/tool schemas. For ordinary chat you can lower it.
+- `QWEN_USE_NODE_FETCH=0` — keeps browser fetch available as fallback; streaming callbacks still use Node streaming first. Set `1` to prefer Node-side responses without browser fallback for most errors.
 - `NON_INTERACTIVE=1` and `SKIP_ACCOUNT_MENU=1` — start without the account menu for local agents/daemons.
 
 The full list of settings with comments is in `.env.example`.
@@ -328,7 +351,7 @@ API Key: dummy-key
 Full instructions: [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md)
 
 
-## Agents and tool use: Hermes, OpenCode, Claude Code, Codex, OpenClaw
+## Agents and tool use: Hermes, OpenCode, Claude Code, OpenClaw
 
 FreeQwenApi supports not just ordinary chat, but also agent/tool-use scenarios. From the outside it looks like OpenAI/Anthropic-compatible tool calling; internally, tool schemas are emulated through the system prompt for Qwen Chat.
 
@@ -453,31 +476,6 @@ claude --bare -p 'Create smoke.js, run npm run smoke, return the terminal output
 Under the hood, the shim converts Anthropic `tools`, `tool_use` and `tool_result` into an OpenAI-style history and back.
 
 
-### Codex CLI
-
-The current Codex CLI no longer supports `wire_api = "chat"`; use the Responses API mode:
-
-```toml
-model = "qwen3.7-max"
-model_provider = "freeqwen"
-approval_policy = "never"
-sandbox_mode = "workspace-write"
-
-[model_providers.freeqwen]
-name = "FreeQwenApi"
-base_url = "http://127.0.0.1:3264/api"
-wire_api = "responses"
-experimental_bearer_token = "dummy-key"
-```
-
-Smoke:
-
-```bash
-CODEX_HOME=/path/to/codex-home \
-codex exec 'Create smoke.js, create package.json with script smoke, run npm run smoke, return output' \
-  --skip-git-repo-check
-```
-
 ### OpenClaw
 
 OpenClaw is best run with a large context — its system prompt and tool list are noticeably larger than normal.
@@ -554,7 +552,7 @@ Ready-made example: [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_l
 - This is a Qwen Chat web proxy, not an official tool-calling API. Tool calls are emulated by a prompt adapter.
 - Sometimes the Qwen web backend returns `chatId не существует`; usually a request retry or a new chat helps.
 - With frequent/long requests, an anti-bot/captcha challenge is possible.
-- For OpenClaw/Codex/Claude Code keep `QWEN_MAX_SYSTEM_CHARS=180000`, otherwise tool instructions may be truncated.
+- For OpenClaw/Claude Code keep `QWEN_MAX_SYSTEM_CHARS=180000`, otherwise tool instructions may be truncated.
 - If the agent writes text instead of calling a tool, check that the client really passed `tools`, and that the server runs with `QWEN_TOOL_PROMPT_MODE=minimal`.
 
 ## Docker
@@ -580,6 +578,7 @@ services:
     environment:
       - SKIP_ACCOUNT_MENU=true
       - PORT=3264
+      - HOST=0.0.0.0
     ports:
       - "3264:3264"
     volumes:
@@ -624,7 +623,7 @@ curl http://localhost:3264/api/videos/status
 - [IMAGE_VIDEO_GENERATION_GUIDE.md](IMAGE_VIDEO_GENERATION_GUIDE.md) — image and video generation via `chatType`.
 - [docs/IMAGE_GENERATION.md](docs/IMAGE_GENERATION.md) — DashScope/Qwen Image endpoints.
 - [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md) — connecting Open WebUI.
-- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider; see the section above for OpenCode, Claude Code, Codex and OpenClaw.
+- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider; see the section above for OpenCode, Claude Code and OpenClaw.
 - [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml) — LiteLLM bridge.
 
 ## Limitations
