@@ -2,7 +2,6 @@
 
 import { loadTokens } from '../src/api/tokenManager.js';
 import { addAccountInteractive, reloginAccountInteractive, removeAccountInteractive } from '../src/utils/accountSetup.js';
-import { formatWatermark } from '../src/utils/branding.js';
 import { prompt } from '../src/utils/prompt.js';
 
 function printDivider() {
@@ -40,7 +39,6 @@ function printAccounts(tokens) {
 }
 
 function handleList(tokens) {
-    console.log(formatWatermark());
     printAccounts(tokens);
     const active = tokens.filter(t => formatStatus(t).code === STATUS_CODES.OK);
     console.log(`\nАктивных аккаунтов: ${active.length} из ${tokens.length}`);
@@ -59,7 +57,6 @@ function parseArgs(argv) {
 function printHelp() {
     printDivider();
     console.log('Скрипт управления аккаунтами Qwen');
-    console.log(formatWatermark());
     printDivider();
     console.log('Опции:');
     console.log('  --list      Показать список аккаунтов и статусы');
@@ -102,7 +99,6 @@ async function runInteractiveMenu() {
     while (true) {
         const tokens = loadTokens();
         printDivider();
-        console.log(formatWatermark());
         printAccounts(tokens);
         printDivider();
         console.log('Меню:');

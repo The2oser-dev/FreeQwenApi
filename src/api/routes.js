@@ -15,7 +15,6 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { parseToolCallJson } from './toolParser.js';
 import { listTokens, markInvalid, markRateLimited, markValid } from './tokenManager.js';
-import { _WATERMARK } from '../utils/branding.js';
 import {
     canonicalizeConversationKey,
     createClientScope,
@@ -1324,7 +1323,6 @@ router.get('/health', async (req, res) => {
         res.json({
             ok: availableAccounts > 0,
             service: 'FreeQwenApi',
-            watermark: _WATERMARK,
             baseUrl: '/api',
             models: modelData.models.length,
             accounts: {
@@ -2299,7 +2297,6 @@ function normalizeDashScopeSize(size) {
 function buildOpenAiImageResponse({ imageUrl, prompt, model, raw, provider = 'qwen-chat' }) {
     return {
         created: Math.floor(Date.now() / 1000),
-        watermark: _WATERMARK,
         provider,
         model,
         data: [{ url: imageUrl, revised_prompt: prompt }],
@@ -2313,7 +2310,6 @@ function buildVideoResponse({ result, prompt, model, waitForCompletion }) {
         id: result.id || result.task_id || `video-${Date.now()}`,
         object: videoUrl ? 'video.generation' : 'video.generation.task',
         created: Math.floor(Date.now() / 1000),
-        watermark: _WATERMARK,
         provider: 'qwen-chat',
         model,
         prompt,
@@ -2477,7 +2473,7 @@ router.get('/tasks/status/:taskId', async (req, res) => {
         if (result.error && !result.data) {
             return sendApiResultError(res, result);
         }
-        return res.json({ watermark: _WATERMARK, ...result });
+        return res.json({ ...result });
     } catch (error) {
         logError('Ошибка при проверке статуса задачи', error);
         res.status(500).json({ error: 'Внутренняя ошибка сервера', message: error.message });
@@ -2492,7 +2488,6 @@ router.get('/images/models', async (req, res) => {
         const dashScopeModels = getAvailableImageModels();
         res.json({
             object: 'list',
-            watermark: _WATERMARK,
             data: [
                 {
                     id: CHAT_MEDIA_MODEL,
@@ -2526,7 +2521,6 @@ router.get('/images/models', async (req, res) => {
 router.get('/videos/models', async (req, res) => {
     res.json({
         object: 'list',
-        watermark: _WATERMARK,
         data: [{
             id: CHAT_MEDIA_MODEL,
             object: 'model',
@@ -2551,7 +2545,6 @@ router.get('/images/status', async (req, res) => {
         const qwenChatAvailable = tokens.some(t => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid);
 
         res.json({
-            watermark: _WATERMARK,
             qwenChat: {
                 available: qwenChatAvailable,
                 model: CHAT_MEDIA_MODEL,
@@ -2581,7 +2574,6 @@ router.get('/videos/status', async (req, res) => {
     const now = Date.now();
     const availableAccounts = tokens.filter(t => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid).length;
     res.json({
-        watermark: _WATERMARK,
         available: availableAccounts > 0,
         model: CHAT_MEDIA_MODEL,
         accounts: { total: tokens.length, available: availableAccounts },

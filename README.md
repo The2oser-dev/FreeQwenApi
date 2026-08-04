@@ -1,9 +1,8 @@
-# FreeQwenApi —  fork
+# FreeQwenApi
 
-> **Локальный OpenAI-compatible прокси к Qwen Chat** от [](https://).  
+> **Локальный OpenAI-compatible прокси к Qwen Chat**.  
 > Текст, модели Qwen 3.7, файлы, Open WebUI, Hermes/LiteLLM, а теперь ещё генерация изображений и видео через Qwen Chat.
 
-![](https://img.shields.io/badge/-t.me%2F-blue)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
 ![Qwen](https://img.shields.io/badge/Qwen-Chat-purple)
 
@@ -28,12 +27,11 @@ http://localhost:3264/api
 - **Open WebUI**: можно подключить как OpenAI-compatible backend.
 - **Hermes Agent / OpenCode / Claude Code / Codex / OpenClaw / LiteLLM**: готовые инструкции для локальных AI-агентов и tool-use smoke-тестов.
 - **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
-- ** branding**: watermark `` в README, CLI и health/media metadata.
 
 ## Быстрый старт
 
 ```bash
-git clone https://github.com//FreeQwenApi
+git clone https://github.com/The2oser-dev/FreeQwenApi
 cd FreeQwenApi
 npm install
 npm run auth
@@ -111,13 +109,12 @@ Proxy по умолчанию слушает только `127.0.0.1`. Для н
 curl http://localhost:3264/api/health
 ```
 
-Ответ содержит количество моделей, аккаунтов и watermark:
+Ответ содержит количество моделей и аккаунтов:
 
 ```json
 {
   "ok": true,
   "service": "FreeQwenApi",
-  "watermark": "",
   "baseUrl": "/api",
   "models": 28
 }
@@ -188,7 +185,6 @@ curl http://localhost:3264/api/images/generations \
 ```json
 {
   "created": 1770000000,
-  "watermark": "",
   "provider": "qwen-chat",
   "model": "qwen3-vl-plus",
   "data": [
@@ -581,9 +577,3 @@ curl http://localhost:3264/api/videos/status
 - Генерация фото/видео зависит от доступности функций Qwen Chat на конкретном аккаунте.
 - URL сгенерированных медиа могут быть временными.
 - Для production используйте осторожно: это инструмент для экспериментов, демо и локальных workflow.
-
-## От 
-
-Если fork помог — подпишитесь: [](https://)
-
-Там практичные AI-инструменты, локальные агенты, open-source находки и честные тесты без корпоративной лапши.

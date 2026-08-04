@@ -8,7 +8,6 @@ import { loadTokens } from './src/api/tokenManager.js';
 import { addAccountInteractive } from './src/utils/accountSetup.js';
 import { logHttpRequest, logInfo, logError, logWarn } from './src/logger/index.js';
 import { prompt } from './src/utils/prompt.js';
-import { _WATERMARK } from './src/utils/branding.js';
 import { PORT, HOST } from './src/config.js';
 import { isBrowserOriginAllowed, normalizeOrigin, parseAllowedOrigins } from './src/api/originPolicy.js';
 
@@ -111,7 +110,6 @@ async function startServer() {
 ██      ██   ██ ███████ ███████  ██████   ███ ███  ███████ ██   ████ ██   ██ ██      ██ 
                                     ▀▀                                                    
    API-прокси для Qwen
-   ${_WATERMARK}
 `);
 
     logInfo('Запуск сервера...');
@@ -133,7 +131,6 @@ async function startServer() {
                 });
             }
             console.log('\n=== Меню ===');
-            console.log(`: ${_WATERMARK}`);
             console.log('1 - Добавить новый аккаунт');
             console.log('2 - Перелогинить аккаунт с истекшим токеном');
             console.log('3 - Запустить прокси (по умолчанию)');
