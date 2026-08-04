@@ -114,12 +114,12 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
             try {
                 const restoredAccountId = process.env.QWEN_BROWSER_ACCOUNT_ID || null;
                 await page.goto(new URL(CHAT_PAGE_URL).origin, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
-                const savedCookies = loadAccountCookies(restoredAccountId);
+                const authToken = loadAuthToken(restoredAccountId);
+                const savedCookies = authToken ? loadAccountCookies(restoredAccountId) : [];
                 if (savedCookies.length) {
                     await page.setCookie(...savedCookies);
                     logInfo(`Восстановлено ${savedCookies.length} cookies сессии Qwen`);
                 }
-                const authToken = loadAuthToken();
                 if (authToken) {
                     await page.evaluate((t) => { try { localStorage.setItem('token', t); } catch (e) {} }, authToken);
                     logInfo('Токен Qwen установлен в localStorage');
@@ -138,7 +138,7 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
     }
 }
 
-async function saveSessionPuppeteer(page) {
+async function saveSessionPuppeteer(page, token = null) {
     try {
         const cookies = await page.cookies();
         const sessionDir = path.join(process.cwd(), SESSION_DIR, ACCOUNTS_DIR);
@@ -149,6 +149,7 @@ async function saveSessionPuppeteer(page) {
         if (!fs.existsSync(accountDir)) fs.mkdirSync(accountDir, { recursive: true });
 
         fs.writeFileSync(path.join(accountDir, 'cookies.json'), JSON.stringify(cookies, null, 2));
+        if (token) fs.writeFileSync(path.join(accountDir, 'token.txt'), token, 'utf8');
         logInfo(`Cookies сохранены для аккаунта ${accountId}`);
         return accountId;
     } catch (error) {
@@ -265,7 +266,7 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
         }
 
         try {
-            const accountId = await saveSessionPuppeteer(page);
+            const accountId = await saveSessionPuppeteer(page, token);
             if (accountId) logInfo(`Сессия сохранена с ID: ${accountId}`);
         } catch (error) {
             logWarn(`Не удалось сохранить cookies-сессию: ${error.message}`);

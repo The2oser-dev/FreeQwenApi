@@ -136,10 +136,11 @@ export function saveAuthToken(token) {
     return false;
 }
 
-export function loadAuthToken() {
+export function loadAuthToken(accountId = null) {
     try {
-        if (fs.existsSync(TOKEN_FILE)) {
-            const token = fs.readFileSync(TOKEN_FILE, 'utf8');
+        const tokenFile = accountId ? getSessionFilePath(accountId, 'token.txt') : TOKEN_FILE;
+        if (fs.existsSync(tokenFile)) {
+            const token = fs.readFileSync(tokenFile, 'utf8');
             logInfo('Токен авторизации загружен');
             return token;
         }
