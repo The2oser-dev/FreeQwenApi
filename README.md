@@ -19,7 +19,7 @@ http://localhost:3264/api
 ## Возможности fork
 
 - **Chat Completions API**: `POST /api/chat/completions`, совместимый с OpenAI SDK, Open WebUI, LiteLLM и агентами.
-- **Актуальные модели Qwen Chat**: `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus` и другие модели из `src/AvailableModels.txt`.
+- **Все модели Qwen Chat**: прокси принимает **любой ID модели** (включая новые из чата Qwen, которых ещё нет в `src/AvailableModels.txt`) и передаёт его в Qwen как есть: `qwen3.7-max`, `qwen3.7-plus`, `qwen3.8-max`, `qwen3-235b-a22b` и т.д.
 - **Генерация изображений через Qwen Chat**: `POST /api/images/generations` без `DASHSCOPE_API_KEY`.
 - **Генерация видео через Qwen Chat**: `POST /api/videos/generations` + polling задач через `GET /api/tasks/status/:taskId`.
 - **Мультиаккаунты**: добавление, перелогин, удаление, статусы `OK` / `WAIT` / `INVALID`, автоматическая round-robin ротация при лимитах.
@@ -164,6 +164,59 @@ const response = await openai.chat.completions.create({
 });
 
 console.log(response.choices[0].message.content);
+```
+
+### Размышление (thinking) и любые модели
+
+Прокси принимает **любой ID модели** — даже те, которых ещё нет в `src/AvailableModels.txt`. Незнакомый ID передаётся в Qwen Chat как есть; Qwen сам решает, доступна ли модель. Алиасы вроде `qwen-max` → `qwen3-max` продолжают работать.
+
+Размышление (thinking/reasoning) включается так же, как тумблер в веб-чате Qwen. Поддерживаются все основные конвенции:
+
+```bash
+curl http://localhost:3264/api/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.7-max",
+    "enable_thinking": true,
+    "messages": [{"role": "user", "content": "Разбери задачу по шагам."}],
+    "stream": true
+  }'
+```
+
+| Поле | Тип | Эффект |
+|------|-----|--------|
+| `enable_thinking` | `boolean` | `true` — включить, `false` — выключить (конвенция Qwen) |
+| `reasoning_effort` | `"low"` / `"medium"` / `"high"` | любое значение, кроме `none` / `off` / `disabled`, включает размышление |
+| `thinking` | `boolean` или `{ "type": "enabled" }` | ещё один способ включить/выключить |
+
+Приоритет: `enable_thinking` → `reasoning_effort` → `thinking` (первый явно заданный побеждает).
+
+**Ход размышлений (`reasoning_content`)**
+
+В потоковом ответе (`stream: true`) рассуждения приходят отдельными SSE-чанками `delta.reasoning_content` (как `delta.content` для обычного текста):
+
+```text
+data: {"choices":[{"delta":{"reasoning_content":"1. Сначала разберём...","content":""}}]}
+data: {"choices":[{"delta":{"content":"Итоговый ответ...","reasoning_content":""}}]}
+data: [DONE]
+```
+
+В не-потоковом ответе рассуждения — в `choices[0].message.reasoning_content`.
+
+OpenAI SDK (поток):
+
+```js
+const stream = await openai.chat.completions.create({
+  model: "qwen3.7-max",
+  enable_thinking: true,
+  messages: [{ role: "user", content: "Разбери задачу по шагам." }],
+  stream: true
+});
+for await (const chunk of stream) {
+  const d = chunk.choices[0]?.delta;
+  if (d?.reasoning_content) console.log("[рассуждение]", d.reasoning_content);
+  if (d?.content) console.log(d.content);
+}
 ```
 
 ## Генерация изображений через Qwen Chat
@@ -537,6 +590,7 @@ services:
 - **Кодинг**: `qwen3-coder-plus`
 - **Изображения/видео через Qwen Chat**: `qwen3-vl-plus`
 - **Open WebUI default**: `qwen3.7-max`
+- **Любая другая модель** (в т.ч. новые из чата Qwen): просто укажите её ID — прокси передаст запрос напрямую.
 
 ## Полезные команды
 
