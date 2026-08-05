@@ -1,10 +1,15 @@
-import { saveSession } from './session.js';
+import { saveAuthToken, saveSession } from './session.js';
 import { setAuthenticationStatus, getAuthenticationStatus, restartBrowserInHeadlessMode } from './browser.js';
 import { extractAuthToken } from '../api/chat.js';
 import { logInfo, logError, logWarn } from '../logger/index.js';
 import { CHAT_PAGE_URL, AUTH_SIGNIN_URL, PAGE_TIMEOUT, RETRY_DELAY } from '../config.js';
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function getSessionAccountId() {
+    const accountId = String(process.env.QWEN_BROWSER_ACCOUNT_ID || '').trim();
+    return accountId || null;
+}
 
 function isPlaywright(context) {
     return context && typeof context.newPage === 'function';
@@ -61,8 +66,10 @@ export async function checkAuthentication(context) {
                 logInfo('Авторизация обнаружена');
                 setAuthenticationStatus(true);
                 try {
-                    await extractAuthToken(context, true);
-                    await saveSession(context);
+                    const accountId = getSessionAccountId();
+                    const token = await extractAuthToken(context, true);
+                    if (token) saveAuthToken(token, accountId);
+                    await saveSession(context, accountId);
                     logInfo('Сессия обновлена');
                 } catch (e) { logError('Не удалось обновить сессию', e); }
                 if (isPW) await page.close();
@@ -88,8 +95,10 @@ export async function checkAuthentication(context) {
             if (loginCountAfter === 0) {
                 logInfo('Авторизация подтверждена.');
                 setAuthenticationStatus(true);
-                await saveSession(context);
-                await extractAuthToken(context, true);
+                const accountId = getSessionAccountId();
+                await saveSession(context, accountId);
+                const token = await extractAuthToken(context, true);
+                if (token) saveAuthToken(token, accountId);
                 if (isPW) await page.close();
                 return true;
             }
@@ -136,8 +145,10 @@ export async function startManualAuthentication(context, skipRestart = false) {
             if (loginCount === 0) {
                 logInfo('Авторизация подтверждена.');
                 setAuthenticationStatus(true);
-                await saveSession(context);
-                await extractAuthToken(context, true);
+                const accountId = getSessionAccountId();
+                await saveSession(context, accountId);
+                const token = await extractAuthToken(context, true);
+                if (token) saveAuthToken(token, accountId);
                 logInfo('Сессия сохранена успешно!');
                 if (isPW) await page.close();
                 if (!skipRestart) await restartBrowserInHeadlessMode();

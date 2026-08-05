@@ -11,10 +11,12 @@ import {
   getBrowserFetchCredentials,
   getManagedAccountId,
   hasAlternativeAccount,
+  isBrowserTransportError,
   isBrowserTokenCooldownActive,
   isQwenAntiBotBody,
   shouldReturnNodeStreamingResponse
 } from '../src/api/chat.js';
+import { compactTranscriptParts } from '../src/api/transcript.js';
 
 test('buildQwenCompletionUrl appends chat_id query required by current Qwen API', () => {
   const url = buildQwenCompletionUrl('https://chat.qwen.ai/api/v2/chat/completions', 'chat-123');
@@ -41,6 +43,18 @@ test('managed bearer requests omit the shared browser cookie jar', () => {
   assert.equal(getBrowserFetchCredentials(getManagedAccountId('browser:managed-account')), 'omit');
   assert.equal(getBrowserFetchCredentials('browser:token-fingerprint'), 'same-origin');
   assert.equal(getBrowserFetchCredentials(null), 'omit');
+});
+
+test('configured managed account uses its restored browser cookies', () => {
+  const previousAccountId = process.env.QWEN_BROWSER_ACCOUNT_ID;
+  process.env.QWEN_BROWSER_ACCOUNT_ID = 'account-a';
+  try {
+    assert.equal(getBrowserFetchCredentials(getManagedAccountId('account-a')), 'same-origin');
+    assert.equal(getBrowserFetchCredentials(getManagedAccountId('account-b')), 'omit');
+  } finally {
+    if (previousAccountId === undefined) delete process.env.QWEN_BROWSER_ACCOUNT_ID;
+    else process.env.QWEN_BROWSER_ACCOUNT_ID = previousAccountId;
+  }
 });
 
 test('browser token cooldown expires and does not follow a refreshed token', () => {
@@ -113,4 +127,25 @@ test('HTTP anti-bot responses fall back to browser fetch unless Node fetch is fo
   assert.equal(shouldReturnNodeStreamingResponse(challenge, true), true);
   assert.equal(shouldReturnNodeStreamingResponse({ ...challenge, hasStreamedChunks: true }, false), true);
   assert.equal(shouldReturnNodeStreamingResponse({ status: 429, errorBody: 'rate limit' }, false), true);
+});
+
+test('large stateless transcripts retain the newest context within a fixed budget', () => {
+  const parts = [
+    'User: old-' + 'x'.repeat(80),
+    'Assistant: middle-' + 'y'.repeat(80),
+    'User: latest instruction'
+  ];
+
+  const transcript = compactTranscriptParts(parts, 90);
+  assert.ok(transcript.length <= 90);
+  assert.match(transcript, /Earlier transcript compacted/);
+  assert.match(transcript, /latest instruction/);
+  assert.doesNotMatch(transcript, /old-/);
+});
+
+test('browser transport failures are separated from upstream API errors', () => {
+  assert.equal(isBrowserTransportError(new Error('Runtime.callFunctionOn timed out')), true);
+  assert.equal(isBrowserTransportError(new Error("Attempted to use detached Frame 'abc'")), true);
+  assert.equal(isBrowserTransportError(new Error('Protocol error (Runtime.callFunctionOn): Target closed')), true);
+  assert.equal(isBrowserTransportError(new Error('Qwen anti-bot challenge returned for browser fetch')), false);
 });

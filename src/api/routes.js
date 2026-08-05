@@ -8,13 +8,14 @@ import { getMappedModel } from './modelMapping.js';
 import { getStsToken, uploadFileToQwen } from './fileUpload.js';
 import { loadHistory, saveHistory, deleteChat } from './chatHistory.js';
 import { generateImage, getAvailableImageModels, checkImageApiAvailability } from './imageGeneration.js';
-import { MAX_FILE_SIZE, UPLOADS_DIR, DEFAULT_MODEL, STREAMING_CHUNK_DELAY, ALLOW_UNSCOPED_SESSION_CHAT_RESTORE, HOST, PORT } from '../config.js';
+import { MAX_FILE_SIZE, MAX_OPENAI_TRANSCRIPT_CHARS, UPLOADS_DIR, DEFAULT_MODEL, STREAMING_CHUNK_DELAY, ALLOW_UNSCOPED_SESSION_CHAT_RESTORE, HOST, PORT } from '../config.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { parseToolCallJson } from './toolParser.js';
 import { resolveThinkingEnabled } from './reasoning.js';
+import { compactTranscriptParts } from './transcript.js';
 import { listTokens, markInvalid, markRateLimited, markValid } from './tokenManager.js';
 import {
     canonicalizeConversationKey,
@@ -513,7 +514,7 @@ function stringifyOpenAIContent(content) {
     return JSON.stringify(content);
 }
 
-function buildStatelessTranscript(messages) {
+function buildStatelessTranscript(messages, maxChars = MAX_OPENAI_TRANSCRIPT_CHARS) {
     const parts = [];
     for (const msg of messages || []) {
         if (!msg || msg.role === 'system') continue;
@@ -532,7 +533,7 @@ function buildStatelessTranscript(messages) {
             parts.push(`${msg.role || 'message'}: ${stringifyOpenAIContent(msg.content)}`);
         }
     }
-    return parts.join('\n\n');
+    return compactTranscriptParts(parts, maxChars);
 }
 
 

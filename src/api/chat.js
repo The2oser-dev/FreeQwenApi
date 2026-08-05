@@ -36,6 +36,7 @@ let browserAuthToken = null;
 let availableModels = null;
 let authKeys = null;
 let browserTokenCooldown = null;
+let browserRecoveryPromise = null;
 const resourceAccountAffinity = createAccountAffinityRegistry();
 const chatAccountAffinity = Object.freeze({
     get: chatId => resourceAccountAffinity.get(buildAffinityKey('chat', chatId)),
@@ -76,7 +77,13 @@ function snapshotManagedToken(tokenObj) {
 }
 
 export function getBrowserFetchCredentials(accountId) {
-    return isBrowserAccountId(accountId) ? 'same-origin' : 'omit';
+    if (isBrowserAccountId(accountId)) return 'same-origin';
+
+    const restoredAccountId = String(process.env.QWEN_BROWSER_ACCOUNT_ID || '').trim();
+    const managedAccountId = getStoredManagedAccountId(accountId);
+    return restoredAccountId && managedAccountId === restoredAccountId
+        ? 'same-origin'
+        : 'omit';
 }
 
 function snapshotBrowserToken(token) {
@@ -204,6 +211,7 @@ async function getPage(context) {
 
 export const pagePool = {
     pages: [],
+    lastUsedAt: new WeakMap(),
     maxSize: PAGE_POOL_SIZE,
 
     async getPage(context) {
@@ -219,6 +227,13 @@ export const pagePool = {
                     logWarn('Страница из пула закрыта, пропускаем');
                     continue;
                 }
+                const idleMs = Date.now() - (this.lastUsedAt.get(page) || 0);
+                this.lastUsedAt.delete(page);
+                if (idleMs > 60_000) {
+                    logInfo(`Страница из пула простаивала ${Math.round(idleMs / 1000)}с, создаём свежую`);
+                    await page.close();
+                    continue;
+                }
                 await page.evaluate(() => document.readyState);
                 return page;
             } catch (e) {
@@ -230,14 +245,30 @@ export const pagePool = {
         }
 
         const newPage = await getPage(context);
-        await newPage.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+        let pageReady = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                await newPage.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+                await delay(2500);
+                await newPage.evaluate(() => document.readyState);
+                pageReady = true;
+                break;
+            } catch (e) {
+                logWarn(`Страница ${attempt + 1}/3: нестабильный фрейм (${e.message?.substring(0, 60)}), повтор...`);
+                await delay(1500);
+            }
+        }
+        if (!pageReady) {
+            try { await newPage.close(); } catch { /* already dead */ }
+            throw new Error('Не удалось подготовить страницу Qwen после 3 попыток');
+        }
 
         if (!browserAuthToken) {
             try {
                 browserAuthToken = await newPage.evaluate(() => localStorage.getItem('token'));
                 logInfo('Токен авторизации получен из браузера');
                 if (browserAuthToken) {
-                    saveAuthToken(browserAuthToken);
+                    saveAuthToken(browserAuthToken, process.env.QWEN_BROWSER_ACCOUNT_ID || null);
                 }
             } catch (e) {
                 logError('Ошибка при получении токена авторизации', e);
@@ -259,16 +290,24 @@ export const pagePool = {
         }
 
         if (this.pages.length < this.maxSize) {
+            this.lastUsedAt.set(page, Date.now());
             this.pages.push(page);
         } else {
             page.close().catch(e => logError('Ошибка при закрытии страницы', e));
         }
     },
 
+    async discardPage(page) {
+        if (!page || page === getBrowserContext()) return;
+        this.lastUsedAt.delete(page);
+        try { await page.close(); } catch { /* already dead */ }
+    },
+
     async clear() {
         const baseContext = getBrowserContext();
         for (const page of this.pages) {
             if (page === baseContext) continue;
+            this.lastUsedAt.delete(page);
             try { await page.close(); } catch (e) {
                 logError('Ошибка при закрытии страницы в пуле', e);
             }
@@ -371,7 +410,7 @@ export async function extractAuthToken(context, forceRefresh = false) {
             if (newToken) {
                 browserAuthToken = newToken;
                 logInfo('Токен авторизации успешно извлечен');
-                saveAuthToken(browserAuthToken);
+                saveAuthToken(browserAuthToken, process.env.QWEN_BROWSER_ACCOUNT_ID || null);
                 return browserAuthToken;
             }
             logError('Токен авторизации не найден в браузере');
@@ -811,6 +850,7 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
         let streamError = null;
         let hasStreamedChunks = false;
         let reasoningContent = '';
+        let summaryThoughtPrev = '';
 
         while (!finished) {
             const { done, value } = await reader.read();
@@ -864,6 +904,23 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
                                 hasStreamedChunks = true;
                             }
                         }
+                        const summaryThought = delta?.extra?.summary_thought?.content;
+                        if (Array.isArray(summaryThought) && summaryThought.length) {
+                            const thoughtText = summaryThought.join('');
+                            if (thoughtText && thoughtText !== summaryThoughtPrev) {
+                                const inc = summaryThoughtPrev && thoughtText.startsWith(summaryThoughtPrev)
+                                    ? thoughtText.slice(summaryThoughtPrev.length)
+                                    : thoughtText;
+                                summaryThoughtPrev = thoughtText;
+                                if (inc) {
+                                    reasoningContent += inc;
+                                    if (typeof onReasoningChunk === 'function') {
+                                        onReasoningChunk(inc);
+                                        hasStreamedChunks = true;
+                                    }
+                                }
+                            }
+                        }
                         if (delta && delta.status === 'finished') finished = true;
                         if (chunk.choices[0].finish_reason) finished = true;
                     }
@@ -877,6 +934,34 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
 
         if (streamError) {
             return { success: false, ...streamError, hasStreamedChunks };
+        }
+
+        if (!fullContent && reasoningContent) {
+            const fallbackTimeoutMs = getQwenRequestTimeout();
+            try {
+                const fbResponse = await fetch(requestUrl, {
+                    method: 'POST',
+                    headers: buildQwenRequestHeaders(token),
+                    body: JSON.stringify({ ...payload, stream: false }),
+                    signal: AbortSignal.timeout(fallbackTimeoutMs)
+                });
+                if (fbResponse.ok) {
+                    const parsed = await fbResponse.json();
+                    const fbMsg = parsed?.choices?.[0]?.message;
+                    if (fbMsg?.content) {
+                        fullContent = fbMsg.content;
+                        if (typeof onChunk === 'function') {
+                            onChunk(fbMsg.content);
+                            hasStreamedChunks = true;
+                        }
+                    }
+                    if (fbMsg?.reasoning_content) reasoningContent = fbMsg.reasoning_content || reasoningContent;
+                    if (!usage && parsed?.usage) usage = parsed.usage;
+                    if (!responseId && parsed?.id) responseId = parsed.id;
+                }
+            } catch {
+                // Ignore fallback errors; keep the empty-content result.
+            }
         }
 
         return {
@@ -909,6 +994,292 @@ export function shouldReturnNodeStreamingResponse(streamedResponse, preferNodeFe
     );
 }
 
+export function isBrowserTransportError(error) {
+    const message = error instanceof Error ? error.message : String(error || '');
+    return /Runtime\.callFunctionOn timed out|Target closed|Connection closed|detached Frame|Session closed|Protocol error|Navigating frame was detached/i.test(message);
+}
+
+async function recoverBrowserTransport() {
+    if (!browserRecoveryPromise) {
+        browserRecoveryPromise = (async () => {
+            logWarn('Соединение с браузером потеряно; перезапускаем браузер и восстанавливаем Qwen-сессию...');
+            await shutdownBrowser();
+            await delay(RETRY_DELAY);
+            if (!await initBrowser(false)) {
+                throw new Error('Не удалось восстановить браузер Qwen');
+            }
+        })().finally(() => {
+            browserRecoveryPromise = null;
+        });
+    }
+    return browserRecoveryPromise;
+}
+
+async function getHealthyBrowserContext() {
+    const context = getBrowserContext();
+    if (context && (typeof context.isClosed !== 'function' || !context.isClosed())) {
+        return context;
+    }
+
+    await recoverBrowserTransport();
+    return getBrowserContext();
+}
+
+async function executeApiRequestWithBrowserStreaming(page, requestBody, onChunk, onReasoningChunk) {
+    const requestId = crypto.randomUUID();
+    const timeoutMs = getQwenRequestTimeout();
+
+    await page.evaluate((data) => {
+        const requests = globalThis.__freeQwenStreamingRequests || (globalThis.__freeQwenStreamingRequests = {});
+        const state = {
+            controller: new AbortController(),
+            events: [],
+            done: false,
+            result: null
+        };
+        requests[data.requestId] = state;
+
+        void (async () => {
+            let timeout = null;
+            try {
+                timeout = setTimeout(() => state.controller.abort(), data.timeoutMs);
+                const response = await fetch(data.apiUrl, {
+                    method: 'POST',
+                    credentials: data.credentials,
+                    headers: data.headers,
+                    body: JSON.stringify(data.payload),
+                    signal: state.controller.signal
+                });
+
+                if (!response.ok) {
+                    const errorBody = await response.text();
+                    state.result = {
+                        success: false,
+                        status: response.status,
+                        statusText: response.statusText,
+                        errorBody,
+                        antiBot: /rgv587|fail_sys_user_validate|_____tmd_____|purecaptcha/i.test(errorBody)
+                    };
+                    return;
+                }
+
+                const contentType = response.headers.get('content-type') || '';
+                if (!contentType.includes('text/event-stream')) {
+                    const body = await response.text();
+                    let parsed = null;
+                    try { parsed = JSON.parse(body); } catch { /* handled below */ }
+                    const topLevelCode = parsed?.code;
+                    const nestedCode = parsed?.data?.code;
+                    const hasStructuredError = parsed && (
+                        parsed.success === false || parsed.error || parsed.data?.error ||
+                        topLevelCode || nestedCode || (Array.isArray(parsed.ret) && parsed.ret.length > 0)
+                    );
+                    const antiBot = /rgv587|fail_sys_user_validate|_____tmd_____|purecaptcha/i.test(body);
+                    if (hasStructuredError || antiBot) {
+                        state.result = {
+                            success: false,
+                            status: topLevelCode === 'RateLimited' || nestedCode === 'RateLimited' ? 429 : antiBot ? 403 : 500,
+                            antiBot,
+                            error: antiBot ? 'Qwen anti-bot challenge returned for browser fetch' : undefined,
+                            errorBody: body
+                        };
+                    } else if (parsed?.choices || parsed?.id || (parsed?.success === true && parsed?.data)) {
+                        state.result = { success: true, isTask: false, data: parsed };
+                    } else {
+                        state.result = { success: false, error: 'Unexpected non-SSE 200 response', errorBody: body };
+                    }
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+let buffer = '';
+                let fullContent = '';
+                let reasoningContent = '';
+                let responseId = null;
+                let usage = null;
+                let finished = false;
+let streamError = null;
+                const rawLog = [];
+                let summaryThoughtPrev = '';
+                let summaryTitlePrev = '';
+
+                while (!finished) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const rawLine of lines) {
+                        const line = rawLine.trim();
+                        if (rawLog.length < 300) rawLog.push(line.slice(0, 1500));
+                        if (!line || !line.startsWith('data:')) continue;
+                        const jsonStr = line.substring(5).trim();
+                        if (!jsonStr) continue;
+                        if (jsonStr === '[DONE]') {
+                            finished = true;
+                            break;
+                        }
+
+                        try {
+                            const chunk = JSON.parse(jsonStr);
+                            if (chunk.code === 'RateLimited' || (chunk.code && chunk.detail)) {
+                                streamError = { status: 429, errorBody: JSON.stringify(chunk) };
+                                finished = true;
+                                break;
+                            }
+                            if (chunk.error && !chunk.choices) {
+                                streamError = { status: 500, errorBody: JSON.stringify(chunk) };
+                                finished = true;
+                                break;
+                            }
+
+                            if (chunk['response.created']) responseId = chunk['response.created'].response_id;
+                            if (chunk.response_id) responseId = chunk.response_id;
+                            if (chunk.choices?.[0]) {
+                                const delta = chunk.choices[0].delta;
+                                if (delta?.content) {
+                                    fullContent += delta.content;
+                                    state.events.push({ type: 'content', value: delta.content });
+                                }
+                                if (delta?.reasoning_content) {
+                                    reasoningContent += delta.reasoning_content;
+                                    state.events.push({ type: 'reasoning', value: delta.reasoning_content });
+                                }
+                                const summaryThought = delta?.extra?.summary_thought?.content;
+                                if (Array.isArray(summaryThought) && summaryThought.length) {
+                                    const thoughtText = summaryThought.join('');
+                                    const prevThought = summaryThoughtPrev;
+                                    if (thoughtText && thoughtText !== prevThought) {
+                                        const inc = prevThought && thoughtText.startsWith(prevThought)
+                                            ? thoughtText.slice(prevThought.length)
+                                            : thoughtText;
+                                        summaryThoughtPrev = thoughtText;
+                                        if (inc) {
+                                            reasoningContent += inc;
+                                            state.events.push({ type: 'reasoning', value: inc });
+                                        }
+                                    } else {
+                                        summaryThoughtPrev = thoughtText;
+                                    }
+                                }
+                                const summaryTitle = delta?.extra?.summary_title?.content;
+                                if (Array.isArray(summaryTitle) && summaryTitle.length && !reasoningContent) {
+                                    const titleText = summaryTitle.join('');
+                                    if (titleText && titleText !== summaryTitlePrev) {
+                                        summaryTitlePrev = titleText;
+                                        reasoningContent += titleText;
+                                        state.events.push({ type: 'reasoning', value: titleText });
+                                    }
+                                }
+                                if (delta?.status === 'finished' || chunk.choices[0].finish_reason) finished = true;
+                            }
+                            if (chunk.usage) usage = chunk.usage;
+                        } catch { /* ignore broken stream chunks */ }
+                    }
+                }
+
+                if (!streamError && !fullContent && reasoningContent) {
+                    const fbController = new AbortController();
+                    const fbTimeout = setTimeout(() => fbController.abort(), data.timeoutMs);
+                    try {
+                        const fbResponse = await fetch(data.apiUrl, {
+                            method: 'POST',
+                            credentials: data.credentials,
+                            headers: data.headers,
+                            body: JSON.stringify({ ...data.payload, stream: false }),
+                            signal: fbController.signal
+                        });
+                        if (fbResponse.ok) {
+                            const fbBody = await fbResponse.text();
+                            try {
+                                const parsed = JSON.parse(fbBody);
+                                const fbMsg = parsed?.choices?.[0]?.message;
+                                if (fbMsg?.content) {
+                                    fullContent = fbMsg.content;
+                                    state.events.push({ type: 'content', value: fbMsg.content });
+                                }
+                                if (fbMsg?.reasoning_content) reasoningContent = fbMsg.reasoning_content || reasoningContent;
+                                if (!usage && parsed?.usage) usage = parsed.usage;
+                                if (!responseId && parsed?.id) responseId = parsed.id;
+                            } catch { /* ignore fallback parse errors */ }
+                        }
+                    } catch { /* ignore fallback fetch errors */ } finally {
+                        clearTimeout(fbTimeout);
+                    }
+                }
+
+                if (streamError) {
+                    state.result = { success: false, ...streamError };
+                    return;
+                }
+
+                state.result = {
+                    success: true,
+                    isTask: false,
+                    data: {
+                        id: responseId || 'chatcmpl-' + Date.now(),
+                        object: 'chat.completion',
+                        created: Math.floor(Date.now() / 1000),
+                        model: data.payload.model,
+                        reasoning_content: reasoningContent,
+                        ...(fullContent ? {} : { rawLog }),
+                        choices: [{ index: 0, message: { role: 'assistant', content: fullContent }, finish_reason: 'stop' }],
+                        usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                        response_id: responseId
+                    }
+                };
+            } catch (error) {
+                state.result = { success: false, error: error.toString() };
+            } finally {
+                if (timeout) clearTimeout(timeout);
+                state.done = true;
+            }
+        })();
+    }, { ...requestBody, requestId, timeoutMs });
+
+    const deadline = Date.now() + timeoutMs + 5_000;
+    let hasStreamedChunks = false;
+    while (Date.now() < deadline) {
+        const snapshot = await page.evaluate((id) => {
+            const state = globalThis.__freeQwenStreamingRequests?.[id];
+            if (!state) return { missing: true };
+            const events = state.events.splice(0, state.events.length);
+            const result = state.done ? state.result : null;
+            if (state.done) delete globalThis.__freeQwenStreamingRequests[id];
+            return { events, done: state.done, result };
+        }, requestId);
+
+        if (snapshot.missing) {
+            return { success: false, error: 'Browser streaming state was lost' };
+        }
+        for (const event of snapshot.events || []) {
+            if (event.type === 'content' && typeof onChunk === 'function') {
+                onChunk(event.value);
+                hasStreamedChunks = true;
+            }
+            if (event.type === 'reasoning' && typeof onReasoningChunk === 'function') {
+                onReasoningChunk(event.value);
+                hasStreamedChunks = true;
+            }
+        }
+        if (snapshot.done) {
+            return { ...(snapshot.result || { success: false, error: 'Browser fetch completed without a result' }), hasStreamedChunks };
+        }
+        await delay(100);
+    }
+
+    await page.evaluate((id) => {
+        const state = globalThis.__freeQwenStreamingRequests?.[id];
+        if (state) {
+            state.controller.abort();
+            delete globalThis.__freeQwenStreamingRequests[id];
+        }
+    }, requestId).catch(() => {});
+    return { success: false, error: `Qwen browser request timed out after ${timeoutMs}ms`, hasStreamedChunks };
+}
+
 async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, credentials = 'omit', onReasoningChunk = null) {
     const preferNodeFetch = String(process.env.QWEN_USE_NODE_FETCH || '').toLowerCase() === '1' || String(process.env.QWEN_USE_NODE_FETCH || '').toLowerCase() === 'true';
     if (payload?.stream !== false && (typeof onChunk === 'function' || preferNodeFetch)) {
@@ -930,6 +1301,10 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
 
     logDebug(`Используем токен: ${token ? 'Токен существует' : 'Токен отсутствует'}`);
     logDebug(`API URL: ${apiUrl}`);
+
+    if (payload?.stream !== false) {
+        return executeApiRequestWithBrowserStreaming(page, requestBody, onChunk, onReasoningChunk);
+    }
 
     return page.evaluate(async (data) => {
         let timeout = null;
@@ -1000,6 +1375,8 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                 let usage = null;
                 let finished = false;
                 let streamError = null;
+                const rawLog = [];
+                let summaryThoughtPrev = '';
 
                 while (!finished) {
                     const { done, value } = await reader.read();
@@ -1009,6 +1386,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                     buffer = lines.pop() || '';
 
                     for (const line of lines) {
+                        if (rawLog.length < 300) rawLog.push(line.trim().slice(0, 1500));
                         if (!line.trim() || !line.startsWith('data: ')) continue;
                         const jsonStr = line.substring(6).trim();
                         if (!jsonStr) continue;
@@ -1031,6 +1409,17 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                                 const delta = chunk.choices[0].delta;
                                 if (delta && delta.content) fullContent += delta.content;
                                 if (delta && delta.reasoning_content) reasoningContent += delta.reasoning_content;
+                                const summaryThought = delta?.extra?.summary_thought?.content;
+                                if (Array.isArray(summaryThought) && summaryThought.length) {
+                                    const thoughtText = summaryThought.join('');
+                                    if (thoughtText && thoughtText !== summaryThoughtPrev) {
+                                        const inc = summaryThoughtPrev && thoughtText.startsWith(summaryThoughtPrev)
+                                            ? thoughtText.slice(summaryThoughtPrev.length)
+                                            : thoughtText;
+                                        summaryThoughtPrev = thoughtText;
+                                        if (inc) reasoningContent += inc;
+                                    }
+                                }
                                 if (delta && delta.status === 'finished') finished = true;
                             }
                             if (chunk.usage) usage = chunk.usage;
@@ -1042,6 +1431,35 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                     return { success: false, ...streamError };
                 }
 
+                if (!fullContent && reasoningContent) {
+                    const fbController = new AbortController();
+                    const fbTimeout = setTimeout(() => fbController.abort(), data.timeoutMs);
+                    try {
+                        const fbResponse = await fetch(data.apiUrl, {
+                            method: 'POST',
+                            credentials: data.credentials,
+                            headers: data.headers,
+                            body: JSON.stringify({ ...data.payload, stream: false }),
+                            signal: fbController.signal
+                        });
+                        if (fbResponse.ok) {
+                            const fbBody = await fbResponse.text();
+                            try {
+                                const parsed = JSON.parse(fbBody);
+                                const fbMsg = parsed?.choices?.[0]?.message;
+                                if (fbMsg?.content) {
+                                    fullContent = fbMsg.content;
+                                }
+                                if (fbMsg?.reasoning_content) reasoningContent = fbMsg.reasoning_content || reasoningContent;
+                                if (!usage && parsed?.usage) usage = parsed.usage;
+                                if (!responseId && parsed?.id) responseId = parsed.id;
+                            } catch { /* ignore fallback parse errors */ }
+                        }
+                    } catch { /* ignore fallback fetch errors */ } finally {
+                        clearTimeout(fbTimeout);
+                    }
+                }
+
                 return {
                     success: true,
                     isTask: false,
@@ -1051,6 +1469,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null, c
                         created: Math.floor(Date.now() / 1000),
                         model: data.payload.model,
                         reasoning_content: reasoningContent,
+                        ...(fullContent ? {} : { rawLog }),
                         choices: [{ index: 0, message: { role: 'assistant', content: fullContent }, finish_reason: 'stop' }],
                         usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
                         response_id: responseId
@@ -1230,7 +1649,12 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
         logInfo(`Тип генерации: ${chatType} (${typeLabels[chatType] || chatType})${size ? `, размер: ${size}` : ''}`);
     }
 
-    const browserContext = getBrowserContext();
+    let browserContext;
+    try {
+        browserContext = await getHealthyBrowserContext();
+    } catch (error) {
+        return { error: `Браузер Qwen недоступен: ${error.message}`, chatId };
+    }
     if (!browserContext) return { error: 'Браузер не инициализирован', chatId };
 
     const { fileAffinity } = filePreflight;
@@ -1319,6 +1743,8 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
         }
         chatId = newChatResult.chatId;
         retryContext.chatId = chatId;
+        browserContext = await getHealthyBrowserContext();
+        retryContext.browserContext = browserContext;
         logInfo(`Создан новый чат v2 с ID: ${chatId}`);
     }
 
@@ -1419,10 +1845,9 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             return { error: taskResult.error || 'Video generation failed', status: taskResult.status, chatId, task_id: taskId };
         }
 
-        pagePool.releasePage(page);
-        page = null;
-
         if (response.success) {
+            pagePool.releasePage(page);
+            page = null;
             logRaw(JSON.stringify(response.data));
             logInfo('Ответ получен успешно');
             bindResourceToAccount('chat', chatId, tokenObj.id);
@@ -1445,9 +1870,21 @@ export async function sendMessage(message, model = DEFAULT_MODEL, chatId = null,
             return response.data;
         }
 
+        await pagePool.discardPage(page);
+        page = null;
         return handleApiError(response, tokenObj, retryContext);
     } catch (error) {
         logError('Ошибка при отправке сообщения', error);
+        await pagePool.discardPage(page);
+        page = null;
+        if (isBrowserTransportError(error) && retryCount < 1) {
+            try {
+                await recoverBrowserTransport();
+                return retryAfterAccountSwitch(retryContext, sendMessage);
+            } catch (recoveryError) {
+                logError('Не удалось автоматически восстановить браузер Qwen', recoveryError);
+            }
+        }
         return { error: error.toString(), chatId };
     } finally {
         if (page) {
@@ -1563,7 +2000,12 @@ export function getAuthToken() {
 // ─── createChatV2 ────────────────────────────────────────────────────────────
 
 export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый чат', retryCount = 0, chatType = 't2t', preferredTokenObj = null) {
-    const browserContext = getBrowserContext();
+    let browserContext;
+    try {
+        browserContext = await getHealthyBrowserContext();
+    } catch (error) {
+        return { error: `Браузер Qwen недоступен: ${error.message}` };
+    }
     if (!browserContext) return { error: 'Браузер не инициализирован' };
 
     const preferredToken = snapshotAccountToken(preferredTokenObj);
@@ -1584,24 +2026,31 @@ export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый ч
         };
 
         const result = await page.evaluate(async (data) => {
+            let timeout = null;
             try {
+                const controller = new AbortController();
+                timeout = setTimeout(() => controller.abort(), data.timeoutMs);
                 const response = await fetch(data.apiUrl, {
                     method: 'POST',
                     credentials: data.credentials,
                     headers: data.headers,
-                    body: JSON.stringify(data.payload)
+                    body: JSON.stringify(data.payload),
+                    signal: controller.signal
                 });
+                clearTimeout(timeout);
+                timeout = null;
                 if (response.ok) return { success: true, data: await response.json() };
                 return { success: false, status: response.status, errorBody: await response.text() };
             } catch (error) {
                 return { success: false, error: error.toString() };
+            } finally {
+                if (timeout) clearTimeout(timeout);
             }
-        }, requestBody);
-
-        pagePool.releasePage(page);
-        page = null;
+        }, { ...requestBody, timeoutMs: getQwenRequestTimeout() });
 
         if (result.success && result.data?.success && result.data?.data?.id) {
+            pagePool.releasePage(page);
+            page = null;
             const createdChatId = result.data.data.id;
             bindResourceToAccount('chat', createdChatId, tokenObj.id);
             logInfo(`Чат создан: ${createdChatId}`);
@@ -1612,6 +2061,9 @@ export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый ч
                 accountId: tokenObj.id
             };
         }
+
+        await pagePool.discardPage(page);
+        page = null;
 
         const structuredErrorBody = result.errorBody || (result.data ? JSON.stringify(result.data) : null);
         const resultCode = result.data?.code || result.data?.data?.code;
@@ -1661,6 +2113,16 @@ export async function createChatV2(model = DEFAULT_MODEL, title = 'Новый ч
         };
     } catch (error) {
         logError('Ошибка при создании чата', error);
+        await pagePool.discardPage(page);
+        page = null;
+        if (isBrowserTransportError(error) && retryCount < 1) {
+            try {
+                await recoverBrowserTransport();
+                return createChatV2(model, title, retryCount + 1, chatType, preferredTokenObj);
+            } catch (recoveryError) {
+                logError('Не удалось автоматически восстановить браузер Qwen', recoveryError);
+            }
+        }
         return { error: error.toString() };
     } finally {
         if (page) {

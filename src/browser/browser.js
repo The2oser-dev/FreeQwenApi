@@ -21,11 +21,18 @@ export let isAuthenticated = false;
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function initBrowser(visibleMode = true, skipManualRestart = false) {
-    if (browserInstance) return true;
+    if (browserInstance) {
+        const connected = typeof browserInstance.isConnected === 'function'
+            ? browserInstance.isConnected()
+            : browserInstance.connected !== false;
+        const pageOpen = browserContext && (typeof browserContext.isClosed !== 'function' || !browserContext.isClosed());
+        if (connected && pageOpen) return true;
+        await shutdownBrowser();
+    }
 
     logInfo('Инициализация браузера с Puppeteer Stealth...');
     try {
-        browserInstance = await puppeteer.launch({
+        const launchedBrowser = await puppeteer.launch({
             headless: !visibleMode,
             slowMo: visibleMode ? 30 : 0,
             executablePath: process.env.CHROME_PATH || undefined,
@@ -44,6 +51,13 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
             defaultViewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
             protocolTimeout: PROTOCOL_TIMEOUT,
             ignoreHTTPSErrors: true
+        });
+        browserInstance = launchedBrowser;
+        launchedBrowser.on('disconnected', () => {
+            if (browserInstance === launchedBrowser) {
+                browserInstance = null;
+                browserContext = null;
+            }
         });
 
         const pages = await browserInstance.pages();
@@ -114,13 +128,15 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
             try {
                 const restoredAccountId = process.env.QWEN_BROWSER_ACCOUNT_ID || null;
                 await page.goto(new URL(CHAT_PAGE_URL).origin, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
-                const authToken = loadAuthToken(restoredAccountId);
-                const savedCookies = authToken ? loadAccountCookies(restoredAccountId) : [];
+                const savedCookies = loadAccountCookies(restoredAccountId);
+                const cookieToken = savedCookies.find(cookie => cookie.name === 'token')?.value || null;
+                const authToken = cookieToken || loadAuthToken(restoredAccountId);
                 if (savedCookies.length) {
                     await page.setCookie(...savedCookies);
                     logInfo(`Восстановлено ${savedCookies.length} cookies сессии Qwen`);
                 }
                 if (authToken) {
+                    saveAuthToken(authToken, restoredAccountId);
                     await page.evaluate((t) => { try { localStorage.setItem('token', t); } catch (e) {} }, authToken);
                     logInfo('Токен Qwen установлен в localStorage');
                 }
@@ -161,7 +177,7 @@ async function saveSessionPuppeteer(page, token = null) {
 async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
     try {
         logInfo('Открытие страницы для ручной авторизации...');
-        await page.goto(CHAT_PAGE_URL, { waitUntil: 'networkidle2', timeout: NAVIGATION_TIMEOUT });
+        await page.goto(CHAT_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
         await delay(5000);
 
         console.log('------------------------------------------------------');

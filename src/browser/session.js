@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const SESSION_PATH = path.resolve(__dirname, '..', '..', SESSION_DIR);
 const TOKEN_FILE = path.join(SESSION_PATH, 'auth_token.txt');
+const TOKENS_FILE = path.join(SESSION_PATH, 'tokens.json');
 
 function getSessionFilePath(accountId, fileName) {
     return accountId
@@ -122,11 +123,29 @@ export function loadAccountCookies(accountId) {
     return [];
 }
 
-export function saveAuthToken(token) {
+export function saveAuthToken(token, accountId = null) {
     try {
         initSessionDirectory();
         if (token) {
             fs.writeFileSync(TOKEN_FILE, token, 'utf8');
+            if (accountId && /^[A-Za-z0-9_-]+$/.test(accountId)) {
+                const accountTokenFile = getSessionFilePath(accountId, 'token.txt');
+                ensureDir(path.dirname(accountTokenFile));
+                fs.writeFileSync(accountTokenFile, token, 'utf8');
+
+                if (fs.existsSync(TOKENS_FILE)) {
+                    const tokens = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'));
+                    const account = Array.isArray(tokens)
+                        ? tokens.find(candidate => candidate.id === accountId)
+                        : null;
+                    if (account) {
+                        account.token = token;
+                        account.invalid = false;
+                        account.resetAt = null;
+                        fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
+                    }
+                }
+            }
             logInfo('Токен авторизации сохранен');
             return true;
         }

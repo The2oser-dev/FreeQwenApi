@@ -65,6 +65,7 @@ export const STREAMING_CHUNK_DELAY = Number(process.env.STREAMING_CHUNK_DELAY) |
 export const PAGE_POOL_SIZE = Number(process.env.PAGE_POOL_SIZE) || 3;
 export const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024; // 10 MB
 export const MAX_HISTORY_LENGTH = Number(process.env.MAX_HISTORY_LENGTH) || 100;
+export const MAX_OPENAI_TRANSCRIPT_CHARS = Number(process.env.MAX_OPENAI_TRANSCRIPT_CHARS) || 120_000;
 export const MAX_RETRY_COUNT = Number(process.env.MAX_RETRY_COUNT) || 3;
 export const TASK_POLL_MAX_ATTEMPTS = Number(process.env.TASK_POLL_MAX_ATTEMPTS) || 90;
 export const TASK_POLL_INTERVAL = Number(process.env.TASK_POLL_INTERVAL) || 2_000;
