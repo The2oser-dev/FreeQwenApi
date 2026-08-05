@@ -3,7 +3,7 @@ import { sendMessage, getAllModels, getApiKeys, createChatV2, pollQwenTaskStatus
 import { sendApiResultError } from './apiErrors.js';
 import { getAuthenticationStatus, getBrowserContext } from '../browser/browser.js';
 import { checkAuthentication } from '../browser/auth.js';
-import { logInfo, logError, logDebug } from '../logger/index.js';
+import { logInfo, logError, logDebug, logWarn } from '../logger/index.js';
 import { getMappedModel } from './modelMapping.js';
 import { getStsToken, uploadFileToQwen } from './fileUpload.js';
 import { loadHistory, saveHistory, deleteChat } from './chatHistory.js';
@@ -1032,6 +1032,28 @@ function writeToolCallsSse(res, mappedModel, result, toolCalls, includeUsage = f
     res.end();
 }
 
+function looksLikeBrokenToolCall(content) {
+    if (typeof content !== 'string') return false;
+    const looksStructured = content.includes('"tool_calls"')
+        || content.includes("'tool_calls'")
+        || /<tool_calls\b|\btool_calls\s*:/i.test(content);
+    return looksStructured && !parseToolCallJson(content);
+}
+
+async function sendMessageWithToolCallRetry(sendOnce, { maxAttempts = 3 } = {}) {
+    let result = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        result = await sendOnce(result);
+        if (!result || result.error) break;
+        if (!looksLikeBrokenToolCall(result?.choices?.[0]?.message?.content)) break;
+        logWarn(`Qwen(web) вернул некорректный tool-call JSON, повторный запрос ${attempt + 2}/${maxAttempts}...`);
+    }
+    if (result && looksLikeBrokenToolCall(result?.choices?.[0]?.message?.content)) {
+        result = { ...result, error: 'Qwen(web) вернул некорректный tool-call JSON несколько раз' };
+    }
+    return result;
+}
+
 // ─── Helpers: streaming ──────────────────────────────────────────────────────
 
 async function handleStreamingResponse(res, mappedModel, messageContent, chatId, parentId, combinedTools, toolChoice, systemMessage) {
@@ -1302,23 +1324,25 @@ router.post('/chat', async (req, res) => {
         }
 
         const qwenChatId = await resolveQwenChatId(effectiveChatId);
-        const result = await sendMessage(
-            messageContent,
-            mappedModel,
-            qwenChatId,
-            effectiveParentId,
-            null,
-            null,
-            null,
-            systemMessage,
-            chatType || 't2t',
-            size || null,
-            waitForCompletion ?? true,
-            0,
-            null,
-            resetMessageContent,
-            getSessionKey(req),
-            thinkingEnabled
+        const result = await sendMessageWithToolCallRetry(
+            async (prev) => sendMessage(
+                messageContent,
+                mappedModel,
+                prev ? null : qwenChatId,
+                prev ? null : effectiveParentId,
+                null,
+                null,
+                null,
+                systemMessage,
+                chatType || 't2t',
+                size || null,
+                waitForCompletion ?? true,
+                prev ? 1 : 0,
+                null,
+                resetMessageContent,
+                getSessionKey(req),
+                thinkingEnabled
+            )
         );
 
         if (!isMeta && result.chatId) {
@@ -1757,24 +1781,26 @@ router.post('/chat/completions', async (req, res) => {
                     };
                 }
 
-                const result = await sendMessage(
-                    messageContent,
-                    mappedModel,
-                    qwenChatId,
-                    effectiveParentId,
-                    files, // ← ПЕРЕДАЁМ FILES
-                    qwenTools,
-                    tool_choice,
-                    toolAwareSystemMessage,
-                    't2t',
-                    null,
-                    true,
-                    0,
-                    streamingCallback,
-                    preparedInput.resetMessageContent,
-                    getSessionKey(req),
-                    thinkingEnabled,
-                    reasoningCallback
+                const result = await sendMessageWithToolCallRetry(
+                    async (prev) => sendMessage(
+                        messageContent,
+                        mappedModel,
+                        prev ? null : qwenChatId,
+                        prev ? null : effectiveParentId,
+                        files, // ← ПЕРЕДАЁМ FILES
+                        qwenTools,
+                        tool_choice,
+                        toolAwareSystemMessage,
+                        't2t',
+                        null,
+                        true,
+                        prev ? 1 : 0,
+                        prev ? null : streamingCallback,
+                        preparedInput.resetMessageContent,
+                        getSessionKey(req),
+                        thinkingEnabled,
+                        prev ? null : reasoningCallback
+                    )
                 );
 
                 // Persist ownership before any response path can return early
@@ -1858,23 +1884,25 @@ router.post('/chat/completions', async (req, res) => {
             }
         } else {
             const qwenChatId = await resolveQwenChatId(effectiveChatId);
-            const result = await sendMessage(
-                messageContent,
-                mappedModel,
-                qwenChatId,
-                effectiveParentId,
-                files,
-                qwenTools,
-                tool_choice,
-                toolAwareSystemMessage,
-                't2t',
-                null,
-                true,
-                0,
-                null,
-                preparedInput.resetMessageContent,
-                getSessionKey(req),
-                thinkingEnabled
+            const result = await sendMessageWithToolCallRetry(
+                async (prev) => sendMessage(
+                    messageContent,
+                    mappedModel,
+                    prev ? null : qwenChatId,
+                    prev ? null : effectiveParentId,
+                    files,
+                    qwenTools,
+                    tool_choice,
+                    toolAwareSystemMessage,
+                    't2t',
+                    null,
+                    true,
+                    prev ? 1 : 0,
+                    null,
+                    preparedInput.resetMessageContent,
+                    getSessionKey(req),
+                    thinkingEnabled
+                )
             );
 
             // Сохраняем chatId в сессию для следующих запросов
@@ -2127,24 +2155,26 @@ router.post('/v1/chat/completions', async (req, res) => {
                     };
                 }
 
-                const result = await sendMessage(
-                    messageContent,
-                    mappedModel,
-                    qwenChatId,
-                    effectiveParentId,
-                    files, // ← ИЗВЛЕКАЕМ FILES
-                    qwenTools,
-                    tool_choice,
-                    toolAwareSystemMessage,
-                    't2t',
-                    null,
-                    true,
-                    0,
-                    streamingCallback,
-                    preparedInput.resetMessageContent,
-                    getSessionKey(req),
-                    thinkingEnabled,
-                    reasoningCallback
+                const result = await sendMessageWithToolCallRetry(
+                    async (prev) => sendMessage(
+                        messageContent,
+                        mappedModel,
+                        prev ? null : qwenChatId,
+                        prev ? null : effectiveParentId,
+                        files, // ← ИЗВЛЕКАЕМ FILES
+                        qwenTools,
+                        tool_choice,
+                        toolAwareSystemMessage,
+                        't2t',
+                        null,
+                        true,
+                        prev ? 1 : 0,
+                        prev ? null : streamingCallback,
+                        preparedInput.resetMessageContent,
+                        getSessionKey(req),
+                        thinkingEnabled,
+                        prev ? null : reasoningCallback
+                    )
                 );
 
                 // Persist ownership before any response path can return early
@@ -2232,23 +2262,25 @@ router.post('/v1/chat/completions', async (req, res) => {
         } else {
             const qwenChatId = await resolveQwenChatId(effectiveChatId);
 
-            const result = await sendMessage(
-                messageContent,
-                mappedModel,
-                qwenChatId,
-                effectiveParentId,
-                files,
-                qwenTools,
-                tool_choice,
-                toolAwareSystemMessage,
-                't2t',
-                null,
-                true,
-                0,
-                null,
-                preparedInput.resetMessageContent,
-                getSessionKey(req),
-                thinkingEnabled
+            const result = await sendMessageWithToolCallRetry(
+                async (prev) => sendMessage(
+                    messageContent,
+                    mappedModel,
+                    prev ? null : qwenChatId,
+                    prev ? null : effectiveParentId,
+                    files,
+                    qwenTools,
+                    tool_choice,
+                    toolAwareSystemMessage,
+                    't2t',
+                    null,
+                    true,
+                    prev ? 1 : 0,
+                    null,
+                    preparedInput.resetMessageContent,
+                    getSessionKey(req),
+                    thinkingEnabled
+                )
             );
 
             // Сохраняем chatId в сессии для следующих запросов
